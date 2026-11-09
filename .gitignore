@@ -1,0 +1,36 @@
+# 规划文件与设计草稿过滤 (Filtered as requested)
+PLAN.md
+plan.md
+ROADMAP.md
+*.plan
+docs/plans/
+
+# Python 运行时与缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# IDE 与操作系统临时文件
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# 本地数据与日志
+*.log
+data/*.db
+data/*.sqlite
+config.local.json
+
+
+# Added by cargo
+
+/target
