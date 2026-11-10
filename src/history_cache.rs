@@ -66,14 +66,12 @@ pub struct HistoryCache {
 
 impl HistoryCache {
     pub fn cache_path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("history_cache.json")))
-            .unwrap_or_else(|| PathBuf::from("history_cache.json"))
+        crate::config::HudConfig::app_dir().join("history_cache.json")
     }
 
     pub fn load() -> Self {
         let p = Self::cache_path();
+        // 1. 优先读取全局缓存 (~/.ai-token-hud/history_cache.json)
         if p.exists() {
             if let Ok(content) = fs::read_to_string(&p) {
                 if let Ok(cache) = serde_json::from_str::<Self>(&content) {
@@ -81,11 +79,30 @@ impl HistoryCache {
                 }
             }
         }
+
+        // 2. 兼容迁移：若全局缓存尚不存在，尝试从旧位置 (exe 同级目录) 迁移
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let legacy = parent.join("history_cache.json");
+                if legacy.exists() && legacy != p {
+                    if let Ok(content) = fs::read_to_string(&legacy) {
+                        if let Ok(cache) = serde_json::from_str::<Self>(&content) {
+                            cache.save();
+                            return cache;
+                        }
+                    }
+                }
+            }
+        }
+
         Self::default()
     }
 
     pub fn save(&self) {
         let p = Self::cache_path();
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         if let Ok(content) = serde_json::to_string_pretty(self) {
             let _ = fs::write(p, content);
         }

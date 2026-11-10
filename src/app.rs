@@ -1677,6 +1677,22 @@ impl TokenHudApp {
                                         });
 
                                         ui.add_space(6.0);
+                                        theme::card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            let dir = crate::config::HudConfig::app_dir();
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("📁 数据与配置存储目录:").strong());
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.button("📂 打开目录").clicked() {
+                                                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                                                    }
+                                                });
+                                            });
+                                            ui.label(RichText::new(dir.to_string_lossy().to_string()).size(11.0).color(Color32::from_rgb(56, 189, 248)));
+                                            ui.label(RichText::new("配置文件 (config.json) 与历史聚合缓存均保存在此，Debug、Release 与各分发版本全局共享").size(10.5).color(theme::MUTED));
+                                        });
+
+                                        ui.add_space(6.0);
                                         ui.label(RichText::new("提示：可在游戏或写代码时，直接用鼠标左键拖动游戏 HUD 横条停靠在屏幕顶部。所有文本均已禁用选取。").color(Color32::from_rgb(148, 163, 184)).size(11.0));
                                     }
 

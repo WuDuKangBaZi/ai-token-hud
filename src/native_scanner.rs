@@ -36,9 +36,7 @@ impl Default for NativeScanner {
 
 impl NativeScanner {
     pub fn new() -> Self {
-        let cache_file = dirs::home_dir()
-            .map(|h| h.join(".ai-token-hud").join("native_cursors.json"))
-            .unwrap_or_else(|| PathBuf::from("native_cursors.json"));
+        let cache_file = crate::config::HudConfig::app_dir().join("native_cursors.json");
 
         let state = if cache_file.exists() {
             fs::read_to_string(&cache_file)

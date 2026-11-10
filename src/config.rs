@@ -205,15 +205,27 @@ impl HudConfig {
         if self.is_cny() { "¥" } else { "$" }
     }
 
+    /// 返回应用统一的数据/配置目录 (`~/.ai-token-hud`)，如不存在则自动创建
+    pub fn app_dir() -> PathBuf {
+        let dir = dirs::home_dir()
+            .map(|h| h.join(".ai-token-hud"))
+            .unwrap_or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
     pub fn config_path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("config.json")))
-            .unwrap_or_else(|| PathBuf::from("config.json"))
+        Self::app_dir().join("config.json")
     }
 
     pub fn load() -> Self {
         let p = Self::config_path();
+        // 1. 优先读取全局配置 (~/.ai-token-hud/config.json)
         if p.exists() {
             if let Ok(content) = fs::read_to_string(&p) {
                 if let Ok(mut cfg) = serde_json::from_str::<Self>(&content) {
@@ -226,11 +238,36 @@ impl HudConfig {
                 }
             }
         }
-        Self::default()
+
+        // 2. 兼容迁移：如果全局配置尚不存在，尝试从旧位置 (exe 同级目录) 迁移
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let legacy = parent.join("config.json");
+                if legacy.exists() && legacy != p {
+                    if let Ok(content) = fs::read_to_string(&legacy) {
+                        if let Ok(mut cfg) = serde_json::from_str::<Self>(&content) {
+                            let tools = ToolDetector::scan_installed_tools();
+                            for t in tools {
+                                cfg.visible_tools.entry(t.id).or_insert(t.detected);
+                            }
+                            cfg.save();
+                            return cfg;
+                        }
+                    }
+                }
+            }
+        }
+
+        let default_cfg = Self::default();
+        default_cfg.save();
+        default_cfg
     }
 
     pub fn save(&self) {
         let p = Self::config_path();
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         if let Ok(content) = serde_json::to_string_pretty(self) {
             let _ = fs::write(p, content);
         }
@@ -542,5 +579,16 @@ mod tests {
         cfg.currency = "CNY".to_string();
         assert_eq!(cfg.format_cost(10.0), "¥66.80");
         assert_eq!(cfg.format_secondary_cost(10.0), "($10.00)");
+    }
+
+    #[test]
+    fn test_app_dir_and_paths() {
+        let dir = HudConfig::app_dir();
+        assert!(dir.is_absolute());
+        assert!(dir.ends_with(".ai-token-hud"));
+        assert!(dir.exists(), "app_dir 应当在调用后自动创建或已存在");
+
+        let cfg_path = HudConfig::config_path();
+        assert_eq!(cfg_path, dir.join("config.json"));
     }
 }
