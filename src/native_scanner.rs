@@ -160,7 +160,7 @@ impl NativeScanner {
 
                                             if ts >= today_start {
                                                 let p = config.get_model_price(model);
-                                                let cost = (inp as f64 * p.input + out as f64 * p.output + cr as f64 * p.cache_read) / 1_000_000.0;
+                                                let cost = p.cost(crate::config::Usage { input: inp, output: out, cache_read: cr, cache_write: cw });
                                                 records.push(TokenRecord {
                                                     request_id: format!("claude_{}_{}", ts, records.len()),
                                                     app_type: "claude".to_string(),
@@ -168,6 +168,7 @@ impl NativeScanner {
                                                     input_tokens: inp,
                                                     output_tokens: out,
                                                     cache_read_tokens: cr,
+                                                    cache_creation_tokens: cw,
                                                     total_tokens: tot,
                                                     total_cost_usd: cost,
                                                     latency_ms: 1500,
@@ -271,6 +272,7 @@ impl NativeScanner {
                                             input_tokens: inp,
                                             output_tokens: out,
                                             cache_read_tokens: cr,
+                                            cache_creation_tokens: 0,
                                             total_tokens: tot,
                                             total_cost_usd: cost,
                                             latency_ms: 1200,
@@ -389,6 +391,7 @@ impl NativeScanner {
                                         input_tokens: (delta_tok as f64 * 0.7) as i64,
                                         output_tokens: (delta_tok as f64 * 0.3) as i64,
                                         cache_read_tokens: 0,
+                                        cache_creation_tokens: 0,
                                         total_tokens: delta_tok,
                                         total_cost_usd: cost,
                                         latency_ms: 1800,

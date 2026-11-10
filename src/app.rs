@@ -82,6 +82,13 @@ impl TokenHudApp {
         }));
         app.tray = crate::tray::SystemTray::new(ctx.clone());
 
+        // 命令行 `--settings [选项卡序号]`：启动后直接打开设置窗口 (便于快捷方式直达与界面核对)
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--settings") {
+            app.show_settings_window = true;
+            app.settings_tab = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0).min(4);
+        }
+
         // 启动时按配置自动获取网络公开接口最新汇率
         if app.config.auto_fetch_rate {
             let tx = app.rate_tx.clone();
@@ -271,10 +278,10 @@ impl TokenHudApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("累计消耗下钻分析").strong().size(13.0).color(theme::WHITE));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.selectable_label(self.drilldown_by_model, "🧠 按模型").clicked() {
+                if ui.selectable_label(self.drilldown_by_model, "按模型").clicked() {
                     self.drilldown_by_model = true;
                 }
-                if ui.selectable_label(!self.drilldown_by_model, "🛠️ 按工具").clicked() {
+                if ui.selectable_label(!self.drilldown_by_model, "🛠 按工具").clicked() {
                     self.drilldown_by_model = false;
                 }
             });
@@ -529,7 +536,7 @@ impl TokenHudApp {
                             }
                             if let Some(s) = &day_stat {
                                 tip.push_str(&format!("💰 消耗: {} {}\n", self.config.format_cost(s.total_cost_usd), self.config.format_secondary_cost(s.total_cost_usd)));
-                                tip.push_str(&format!("🪙 Token: {}\n", StatsEngine::format_compact(s.total_tokens)));
+                                tip.push_str(&format!("Token: {}\n", StatsEngine::format_compact(s.total_tokens)));
                                 tip.push_str(&format!("⚡ 请求: {} 次", s.request_count));
                             } else {
                                 tip.push_str("当日暂无调用记录");
@@ -567,7 +574,7 @@ impl TokenHudApp {
                 };
                 let tiles = [
                     ("💰 累计金额", self.config.format_cost(summary.total_cost_usd), self.config.format_secondary_cost(summary.total_cost_usd), theme::YELLOW),
-                    ("🪙 总 Token", StatsEngine::format_compact(summary.total_tokens), format!("{} 个模型", summary.models.len()), theme::CYAN),
+                    ("总 Token", StatsEngine::format_compact(summary.total_tokens), format!("{} 个模型", summary.models.len()), theme::CYAN),
                     ("⚡ 请求总数", format!("{}", summary.total_requests), "次调用".to_string(), theme::GREEN),
                     ("♻ 缓存命中率", cache_rate, format!("读取 {}", StatsEngine::format_compact(summary.total_cache_read_tokens)), theme::PURPLE),
                 ];
@@ -597,7 +604,7 @@ impl TokenHudApp {
 
             // 搜索与过滤
             ui.horizontal(|ui| {
-                ui.label(RichText::new("🧠 各模型消耗明细 (按金额降序):").strong().size(12.0).color(Color32::from_rgb(250, 204, 21)));
+                ui.label(RichText::new("各模型消耗明细 (按金额降序):").strong().size(12.0).color(Color32::from_rgb(250, 204, 21)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let just_copied = self.copied_at.is_some_and(|t| t.elapsed().as_secs() < 2);
                     let copy_label = if just_copied { "✔ 已复制" } else { "📋 复制表格" };
@@ -688,7 +695,7 @@ impl TokenHudApp {
                         let row_bg = ui.painter().add(egui::Shape::Noop);
                         let row = ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::Vec2::new(col_gap, 0.0);
-                            let tip = format!("🧠 模型: {}\n全称: {}\n原始: {}", short_name, m.display_name, m.model);
+                            let tip = format!("模型: {}\n全称: {}\n原始: {}", short_name, m.display_name, m.model);
                             render_tcell(ui, col_w_model, RichText::new(&short_name).color(model_color).strong().size(11.0), false, Some(tip));
 
                             render_tcell(ui, col_w_inp, RichText::new(StatsEngine::format_compact(m.input_tokens)).color(Color32::from_rgb(209, 213, 219)).size(11.0), true, None);
@@ -1106,13 +1113,13 @@ impl TokenHudApp {
 
                                         let lbl = ui.label(RichText::new(short_name).color(tool_color).strong().size(11.0));
                                         if !t.models.is_empty() {
-                                            let mut tip = format!("🛠️ {} 模型消耗下钻明细:\n", t.name);
+                                            let mut tip = format!("🛠 {} 模型消耗下钻明细:\n", t.name);
                                             for m in &t.models {
                                                 tip.push_str(&format!(" • {}: {} ({} {})\n", m.model, StatsEngine::format_compact(m.tokens), self.config.format_cost(m.cost), self.config.format_secondary_cost(m.cost)));
                                             }
                                             lbl.on_hover_text(tip.trim_end());
                                         } else {
-                                            lbl.on_hover_text(format!("🛠️ {} (暂无调用记录)", t.name));
+                                            lbl.on_hover_text(format!("🛠 {} (暂无调用记录)", t.name));
                                         }
 
                                         ui.label(RichText::new(StatsEngine::format_compact(t.total_tokens)).color(c_white).size(11.0));
@@ -1133,12 +1140,12 @@ impl TokenHudApp {
                                         let model_color = theme::model_color(&m.short_name);
 
                                         let m_lbl = ui.label(RichText::new(&m.short_name).color(model_color).strong().size(11.0));
-                                        let mut tip = format!("🧠 模型: {}\n", m.model);
+                                        let mut tip = format!("模型: {}\n", m.model);
                                         if !m.display_name.is_empty() && m.display_name != m.model {
                                             tip.push_str(&format!("   全称: {}\n", m.display_name));
                                         }
                                         if !m.tools.is_empty() {
-                                            tip.push_str("🛠️ 调用来源:\n");
+                                            tip.push_str("🛠 调用来源:\n");
                                             for sub in &m.tools {
                                                 tip.push_str(&format!(" • {}: {} ({}%)\n", sub.name, StatsEngine::format_compact(sub.tokens), sub.percentage));
                                             }
@@ -1303,7 +1310,7 @@ impl TokenHudApp {
                                     let row = ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(col_gap, 0.0);
                                         // 1. 模型名称 (靠左)
-                                        let tip = format!("🧠 模型: {}\n全称: {}\n原始: {}", m.short_name, m.display_name, m.raw_model);
+                                        let tip = format!("模型: {}\n全称: {}\n原始: {}", m.short_name, m.display_name, m.raw_model);
                                         render_cell(ui, col_w_model, RichText::new(&m.short_name).color(model_color).strong().size(11.0), false, Some(tip));
 
                                         // 2. 当天 (靠右)
@@ -1370,7 +1377,7 @@ impl TokenHudApp {
     });
 
         // =========================================================================
-        // 🖱️ 悬浮窗右键快捷菜单 (收缩到右下角托盘、设置、退出)
+        // 🖱 悬浮窗右键快捷菜单 (收缩到右下角托盘、设置、退出)
         // =========================================================================
         if self.show_context_menu {
             let menu_w = 190.0;
@@ -1420,7 +1427,7 @@ impl TokenHudApp {
                                 self.calendar_state.refresh(&self.collector, &self.config);
                                 self.show_context_menu = false;
                             }
-                            if ui.button(RichText::new("⚙️  设置与详细统计").size(11.5).color(Color32::from_rgb(229, 231, 235))).clicked() {
+                            if ui.button(RichText::new("⚙  设置与详细统计").size(11.5).color(Color32::from_rgb(229, 231, 235))).clicked() {
                                 self.show_settings_window = true;
                                 self.settings_tab = 1;
                                 self.show_context_menu = false;
@@ -1448,7 +1455,7 @@ impl TokenHudApp {
         }
 
         // =========================================================================
-        // 🖥️ 独立设置窗口 (单独开一个窗口设置，完全不遮挡主 HUD 横条)
+        // 🖥 独立设置窗口 (单独开一个窗口设置，完全不遮挡主 HUD 横条)
         // =========================================================================
         if self.show_settings_window {
             let mut builder = ViewportBuilder::default()
@@ -1483,7 +1490,7 @@ impl TokenHudApp {
                                 "📊 完整下钻明细",
                                 "💰 计价与汇率设置",
                                 "🎨 展现与偏好",
-                                "🛠️ 驱动与监控工具",
+                                "🛠 驱动与监控工具",
                             ];
                             for (idx, tab_name) in tabs.iter().enumerate() {
                                 if ui.selectable_label(self.settings_tab == idx, RichText::new(*tab_name).size(12.0).strong()).clicked() {
@@ -1552,7 +1559,7 @@ impl TokenHudApp {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label("当前展示模式:");
-                                                for (mode, label) in [("tool", "🛠️ 按工具 (By Tool)"), ("model", "🧠 按模型 (By Model)"), ("cost", "💰 仅金额 (By Cost)")] {
+                                                for (mode, label) in [("tool", "🛠 按工具 (By Tool)"), ("model", "按模型 (By Model)"), ("cost", "💰 仅金额 (By Cost)")] {
                                                     if ui.selectable_label(self.config.view_mode == mode, label).clicked() {
                                                         self.set_view_mode(mode);
                                                     }
@@ -1839,7 +1846,7 @@ impl TokenHudApp {
                                                                 remove_custom_id = Some(id.to_string());
                                                             }
                                                         }
-                                                        if ui.button(RichText::new(if is_editing { "✖ 收起" } else { "✏ 自定义单价" }).size(10.0)).clicked() {
+                                                        if ui.button(RichText::new(if is_editing { "收起" } else { "✏ 自定义单价" }).size(10.0)).clicked() {
                                                             if is_editing {
                                                                 self.editing_model_id = None;
                                                             } else {
@@ -1877,6 +1884,7 @@ impl TokenHudApp {
                                                                     input: inp,
                                                                     output: out,
                                                                     cache_read: cache,
+                                                                    cache_write: p.cache_write,
                                                                 },
                                                             ));
                                                             self.editing_model_id = None;
@@ -1903,7 +1911,7 @@ impl TokenHudApp {
                                         }
                                     }
 
-                                    // 选项卡 4: 🛠️ 驱动与监控工具
+                                    // 选项卡 4: 🛠 驱动与监控工具
                                     _ => {
                                         // 驱动引擎运行状态卡片 (双模智能自适应)
                                         theme::card().show(ui, |ui| {
@@ -1969,7 +1977,7 @@ impl TokenHudApp {
                                         let mut changed = false;
                                         for t in detected_tools {
                                             let mut is_checked = self.config.is_tool_visible(&t.id);
-                                            let status_tag = if t.detected { "✔ 已安装" } else { "✘ 未检测" };
+                                            let status_tag = if t.detected { "✔ 已安装" } else { "未检测" };
                                             let path_str = t.detected_path.unwrap_or_else(|| "未找到目录".into());
 
                                             theme::card().show(ui, |ui| {
@@ -1983,7 +1991,7 @@ impl TokenHudApp {
                                                         ui.label(RichText::new(status_tag).color(if t.detected { Color32::from_rgb(74, 222, 128) } else { Color32::from_rgb(148, 163, 184) }).size(11.0));
                                                     });
                                                 });
-                                                ui.label(RichText::new(format!("检测路径: {}", path_str)).size(10.0).color(Color32::from_rgb(100, 116, 139)));
+                                                ui.label(RichText::new(format!("检测路径: {}", path_str)).size(10.0).color(theme::MUTED));
                                             });
                                         }
 

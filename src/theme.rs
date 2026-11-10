@@ -30,9 +30,14 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, CARD_BORDER);
     v.widgets.inactive.weak_bg_fill = Color32::from_rgb(36, 41, 52);
     v.widgets.inactive.bg_fill = Color32::from_rgb(36, 41, 52);
+    // 未选中的复选框 / 单选框 / 按钮需要描边，否则在深色卡片上几乎看不见轮廓
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 85, 105));
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.5, WHITE);
+    v.widgets.active.fg_stroke = Stroke::new(1.5, WHITE);
     v.widgets.hovered.weak_bg_fill = Color32::from_rgb(48, 56, 72);
     v.widgets.hovered.bg_fill = Color32::from_rgb(48, 56, 72);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(71, 85, 105));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(100, 116, 139));
     v.widgets.active.weak_bg_fill = Color32::from_rgb(30, 64, 110);
     v.widgets.active.bg_fill = Color32::from_rgb(30, 64, 110);
     v.selection.bg_fill = Color32::from_rgb(30, 64, 110);
@@ -43,7 +48,10 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.hovered.rounding = r;
     v.widgets.active.rounding = r;
     v.widgets.open.rounding = r;
-    ctx.set_visuals(v);
+    // 界面的卡片与文字颜色均按深色设计，必须锁定深色主题：
+    // 否则在 Windows 浅色模式下 egui 会跟随系统切到浅色样式，默认文字变黑，叠在深色卡片上无法阅读
+    ctx.set_theme(egui::Theme::Dark);
+    ctx.set_visuals_of(egui::Theme::Dark, v);
 }
 
 /// 设置窗口内的统一卡片容器

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::config::HudConfig;
+use crate::config::{HudConfig, Usage};
 use crate::collector::TokenCollector;
 use crate::detector::ToolDetector;
 use crate::history_cache::HistoryCache;
@@ -141,13 +141,7 @@ impl StatsEngine {
                 continue;
             }
             today_tokens += r.total_tokens;
-            let mut cost = r.total_cost_usd;
-            if let Some(p) = config.get_custom_price_if_any(&r.model) {
-                cost = (r.input_tokens as f64 * p.input
-                    + r.output_tokens as f64 * p.output
-                    + r.cache_read_tokens as f64 * p.cache_read)
-                    / 1_000_000.0;
-            }
+            let cost = config.effective_cost(&r.model, r.total_cost_usd, r.usage());
             today_cost += cost;
         }
 
@@ -192,13 +186,7 @@ impl StatsEngine {
             if config.view_mode != "cost" && !config.is_tool_visible(&r.app_type) {
                 continue;
             }
-            let mut cost = r.total_cost_usd;
-            if let Some(p) = config.get_custom_price_if_any(&r.model) {
-                cost = (r.input_tokens as f64 * p.input
-                    + r.output_tokens as f64 * p.output
-                    + r.cache_read_tokens as f64 * p.cache_read)
-                    / 1_000_000.0;
-            }
+            let cost = config.effective_cost(&r.model, r.total_cost_usd, r.usage());
             *tool_costs.entry(r.app_type.clone()).or_insert(0.0) += cost;
             *model_costs.entry(r.model.clone()).or_insert(0.0) += cost;
         }
@@ -237,7 +225,7 @@ impl StatsEngine {
             ) {
                 // 1.1 读取 usage_daily_rollups 历史归档卷 (包含 Codex、GPT-6 Astra 等早期数千美元数据)
                 let rollups_query = "
-                    SELECT model, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens
+                    SELECT model, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
                     FROM usage_daily_rollups
                 ";
                 if let Ok(mut r_stmt) = conn.prepare(rollups_query) {
@@ -249,14 +237,13 @@ impl StatsEngine {
                         let inp: i64 = row.get(3).unwrap_or(0);
                         let out: i64 = row.get(4).unwrap_or(0);
                         let cache: i64 = row.get(5).unwrap_or(0);
-                        Ok((m, date_str, cost, inp, out, cache))
+                        let cw: i64 = row.get(6).unwrap_or(0);
+                        Ok((m, date_str, cost, inp, out, cache, cw))
                     }) {
                         for r in r_rows.flatten() {
-                            let (raw_m, date_str, mut cost, inp, out, cache) = r;
+                            let (raw_m, date_str, cost, inp, out, cache, cw) = r;
                             let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                                cost = (inp as f64 * p.input + out as f64 * p.output + cache as f64 * p.cache_read) / 1_000_000.0;
-                            }
+                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
                             let ts = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
                                 .ok()
                                 .and_then(|d| d.and_hms_opt(12, 0, 0))
@@ -281,7 +268,7 @@ impl StatsEngine {
 
                 // 1.2 读取 proxy_request_logs 明细历史记录 (created_at < bounds.today_start)
                 let query = "
-                    SELECT model, created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens
+                    SELECT model, created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
                     FROM proxy_request_logs
                     WHERE created_at < ?
                 ";
@@ -294,14 +281,13 @@ impl StatsEngine {
                         let inp: i64 = row.get(3).unwrap_or(0);
                         let out: i64 = row.get(4).unwrap_or(0);
                         let cache: i64 = row.get(5).unwrap_or(0);
-                        Ok((m, ts, cost, inp, out, cache))
+                        let cw: i64 = row.get(6).unwrap_or(0);
+                        Ok((m, ts, cost, inp, out, cache, cw))
                     }) {
                         for r in rows.flatten() {
-                            let (raw_m, ts, mut cost, inp, out, cache) = r;
+                            let (raw_m, ts, cost, inp, out, cache, cw) = r;
                             let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                                cost = (inp as f64 * p.input + out as f64 * p.output + cache as f64 * p.cache_read) / 1_000_000.0;
-                            }
+                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
                             let entry = model_map.entry(clean_m).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
                             if ts >= bounds.week_start {
                                 entry.1 += cost;
@@ -322,13 +308,7 @@ impl StatsEngine {
         // 2. 累加今日活跃记录 (collector.records, created_at >= bounds.today_start)
         for r in &collector.records {
             let clean_m = r.model.split('/').last().unwrap_or(&r.model).trim().to_string();
-            let mut cost = r.total_cost_usd;
-            if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                cost = (r.input_tokens as f64 * p.input
-                    + r.output_tokens as f64 * p.output
-                    + r.cache_read_tokens as f64 * p.cache_read)
-                    / 1_000_000.0;
-            }
+            let cost = config.effective_cost(&clean_m, r.total_cost_usd, r.usage());
             let entry = model_map.entry(clean_m).or_insert((0.0, 0.0, 0.0, 0.0, 0.0));
             entry.0 += cost;
             entry.1 += cost;
@@ -416,13 +396,7 @@ impl StatsEngine {
         for r in &collector.records {
             let tid = &r.app_type;
             if let Some(entry) = tool_map.get_mut(tid) {
-                let mut cost = r.total_cost_usd;
-                if let Some(p) = config.get_custom_price_if_any(&r.model) {
-                    cost = (r.input_tokens as f64 * p.input
-                        + r.output_tokens as f64 * p.output
-                        + r.cache_read_tokens as f64 * p.cache_read)
-                        / 1_000_000.0;
-                }
+                let cost = config.effective_cost(&r.model, r.total_cost_usd, r.usage());
 
                 entry.total_tokens += r.total_tokens;
                 entry.total_cost_usd += cost;
@@ -511,13 +485,7 @@ impl StatsEngine {
 
             let m_name = &r.model;
             let p = config.get_model_price(m_name);
-            let mut cost = r.total_cost_usd;
-            if let Some(cp) = config.get_custom_price_if_any(m_name) {
-                cost = (r.input_tokens as f64 * cp.input
-                    + r.output_tokens as f64 * cp.output
-                    + r.cache_read_tokens as f64 * cp.cache_read)
-                    / 1_000_000.0;
-            }
+            let cost = config.effective_cost(m_name, r.total_cost_usd, r.usage());
 
             let m_entry = model_map.entry(m_name.clone()).or_insert_with(|| ModelStats {
                 model: m_name.clone(),
@@ -600,7 +568,11 @@ impl StatsEngine {
                 "Claude"
             };
 
-            let ver = if lower.contains("5-5") || lower.contains("5.5") {
+            let ver = if lower.contains("fable-5-2") || lower.contains("fable-5.2") {
+                " 5.2"
+            } else if lower.contains("fable-5-1") || lower.contains("fable-5.1") {
+                " 5.1"
+            } else if lower.contains("5-5") || lower.contains("5.5") {
                 " 5.5"
             } else if lower.contains("3-7") || lower.contains("3.7") {
                 " 3.7"

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::collector::TokenCollector;
-use crate::config::HudConfig;
+use crate::config::{HudConfig, Usage};
 
 /// 获取本地时间今天 00:00:00 的秒级时间戳 (带时区感知，如 UTC+8)
 pub fn local_start_of_today() -> i64 {
@@ -19,6 +19,9 @@ pub fn local_start_of_today() -> i64 {
             ts - (ts % 86400)
         })
 }
+
+/// 历史归档金额的计价规则版本，规则变化时递增以触发缓存重建
+const PRICING_REV: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CachedModelData {
@@ -50,6 +53,9 @@ pub struct HistoryCache {
     /// 是否已同步 CC Switch 的 usage_daily_rollups 压缩归档卷
     #[serde(default)]
     pub rollups_synced: bool,
+    /// 生成该缓存时的计价规则版本；与 PRICING_REV 不一致时整份重建
+    #[serde(default)]
+    pub pricing_rev: u32,
     /// 按工具聚合的历史数据: tool_id -> CachedToolData
     pub tools: HashMap<String, CachedToolData>,
     /// 按模型聚合的历史数据: model_name -> CachedModelData
@@ -92,6 +98,11 @@ impl HistoryCache {
         }
 
         let today_start = local_start_of_today();
+        if self.pricing_rev != PRICING_REV {
+            // 计价规则变更 (如未计价记录改为按内置单价补算) 后，旧缓存里的金额已不可用
+            self.rollups_synced = false;
+            self.pricing_rev = PRICING_REV;
+        }
         // 如果已经归档到了今天 0 点以前且已包含 rollups，说明 T-1 已经完全持久化，无需重复读取任何历史数据
         if self.rollups_synced && self.last_archived_timestamp >= today_start - 1 && !self.tools.is_empty() {
             return 0;
@@ -114,7 +125,7 @@ impl HistoryCache {
 
                 let rollups_query = "
                     SELECT app_type, model, input_tokens, output_tokens,
-                           cache_read_tokens, total_cost_usd, request_count
+                           cache_read_tokens, total_cost_usd, request_count, cache_creation_tokens
                     FROM usage_daily_rollups
                 ";
                 if let Ok(mut r_stmt) = conn.prepare(rollups_query) {
@@ -129,14 +140,12 @@ impl HistoryCache {
                         let cost_str: Option<String> = row.get(5).ok();
                         let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                         let req_cnt: usize = row.get::<_, i64>(6).unwrap_or(1) as usize;
+                        let cw: i64 = row.get(7).unwrap_or(0);
+                        let cost = config.effective_cost(&model, cost, Usage { input: input_tok, output: output_tok, cache_read: cache_tok, cache_write: cw });
                         Ok((app_type, model, input_tok, output_tok, cache_tok, total_tok, cost, req_cnt))
                     }) {
                         for r in r_rows.flatten() {
-                            let (app_type, model, inp, out, cache_rd, tot_tok, mut cost, req_cnt) = r;
-                            if let Some(p) = config.get_custom_price_if_any(&model) {
-                                cost = (inp as f64 * p.input + out as f64 * p.output + cache_rd as f64 * p.cache_read) / 1_000_000.0;
-                            }
-
+                            let (app_type, model, _, _, _, tot_tok, cost, req_cnt) = r;
                             self.total_tokens += tot_tok;
                             self.total_cost_usd += cost;
                             self.total_requests += req_cnt;
@@ -176,7 +185,7 @@ impl HistoryCache {
             let query = "
                 SELECT
                     request_id, app_type, model, input_tokens, output_tokens,
-                    cache_read_tokens, total_cost_usd, latency_ms, created_at
+                    cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens
                 FROM proxy_request_logs
                 WHERE created_at > ? AND created_at < ?
                 ORDER BY created_at ASC
@@ -195,15 +204,13 @@ impl HistoryCache {
                     let app_type = TokenCollector::normalize_app_type(&raw_app);
                     let model: String = row.get::<_, String>(2).unwrap_or_else(|_| "unknown".into());
                     let created_at: i64 = row.get(8).unwrap_or(0);
+                    let cw: i64 = row.get(9).unwrap_or(0);
+                    let cost = config.effective_cost(&model, cost, Usage { input: input_tok, output: output_tok, cache_read: cache_tok, cache_write: cw });
 
                     Ok((app_type, model, input_tok, output_tok, cache_tok, total_tok, cost, created_at))
                 }) {
                     for r in rows.flatten() {
-                        let (app_type, model, inp, out, cache_rd, tot_tok, mut cost, created_at) = r;
-                        if let Some(p) = config.get_custom_price_if_any(&model) {
-                            cost = (inp as f64 * p.input + out as f64 * p.output + cache_rd as f64 * p.cache_read) / 1_000_000.0;
-                        }
-
+                        let (app_type, model, _, _, _, tot_tok, cost, created_at) = r;
                         if created_at > max_seen_ts {
                             max_seen_ts = created_at;
                         }

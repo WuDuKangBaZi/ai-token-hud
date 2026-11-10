@@ -14,6 +14,7 @@ pub struct TokenRecord {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
     pub total_tokens: i64,
     pub total_cost_usd: f64,
     pub latency_ms: i64,
@@ -50,6 +51,17 @@ impl Default for TokenCollector {
     }
 }
 
+impl TokenRecord {
+    pub fn usage(&self) -> crate::config::Usage {
+        crate::config::Usage {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_creation_tokens,
+        }
+    }
+}
+
 impl TokenCollector {
     pub fn normalize_app_type(raw: &str) -> String {
         let lower = raw.trim().to_lowercase();
@@ -74,6 +86,17 @@ impl TokenCollector {
         } else {
             lower
         }
+    }
+
+    /// 单次请求的输出生成速率 (Token/秒)。
+    /// 耗时缺失或不足 100ms 的记录返回 None：会话日志导入的记录里约一成 latency_ms 为 0，
+    /// 若把耗时兜底成 0.1 秒，476 个输出 Token 就会被算成 4760 T/s。
+    /// 只用输出 Token 计算——总 Token 含几十万缓存读取，除以耗时没有意义。
+    pub fn request_speed(output_tokens: i64, latency_ms: i64) -> Option<f64> {
+        if output_tokens <= 0 || latency_ms < 100 {
+            return None;
+        }
+        Some(output_tokens as f64 / (latency_ms as f64 / 1000.0))
     }
 
     pub fn now_sec() -> f64 {
@@ -106,14 +129,7 @@ impl TokenCollector {
             let mut latest_speed = 0.0;
             let mut latest_speed_ts = 0.0;
             for rec in new_records {
-                let latency_sec = (rec.latency_ms as f64 / 1000.0).max(0.1);
-                let speed = if rec.output_tokens > 0 {
-                    rec.output_tokens as f64 / latency_sec
-                } else if rec.total_tokens > 0 {
-                    rec.total_tokens as f64 / latency_sec
-                } else {
-                    0.0
-                };
+                let speed = Self::request_speed(rec.output_tokens, rec.latency_ms).unwrap_or(0.0);
                 if speed > 0.0 {
                     latest_speed = speed;
                     latest_speed_ts = rec.created_at as f64;
@@ -156,7 +172,7 @@ impl TokenCollector {
             let (query, param): (&str, i64) = if is_first_sync {
                 (
                     "SELECT rowid, request_id, app_type, model, input_tokens, output_tokens,
-                            cache_read_tokens, total_cost_usd, latency_ms, created_at
+                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens
                      FROM proxy_request_logs
                      WHERE created_at >= ?
                      ORDER BY rowid ASC",
@@ -165,7 +181,7 @@ impl TokenCollector {
             } else {
                 (
                     "SELECT rowid, request_id, app_type, model, input_tokens, output_tokens,
-                            cache_read_tokens, total_cost_usd, latency_ms, created_at
+                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens
                      FROM proxy_request_logs
                      WHERE rowid > ?
                      ORDER BY rowid ASC",
@@ -195,6 +211,7 @@ impl TokenCollector {
                             input_tokens: input_tok,
                             output_tokens: output_tok,
                             cache_read_tokens: cache_tok,
+                            cache_creation_tokens: row.get(10).unwrap_or(0),
                             total_tokens: total_tok,
                             total_cost_usd: cost,
                             latency_ms: row.get(8).unwrap_or(0),
@@ -213,15 +230,7 @@ impl TokenCollector {
                             self.last_sync_timestamp = rec.created_at;
                         }
 
-                        // 计算单次请求的真实生成速率 (Token/s: 以输出 Token 速率为主，兼顾总 Token)
-                        let latency_sec = (rec.latency_ms as f64 / 1000.0).max(0.1);
-                        let speed = if rec.output_tokens > 0 {
-                            rec.output_tokens as f64 / latency_sec
-                        } else if rec.total_tokens > 0 {
-                            rec.total_tokens as f64 / latency_sec
-                        } else {
-                            0.0
-                        };
+                        let speed = Self::request_speed(rec.output_tokens, rec.latency_ms).unwrap_or(0.0);
 
                         if speed > 0.0 {
                             latest_speed = speed;
@@ -238,22 +247,15 @@ impl TokenCollector {
                     } else if self.current_speed <= 0.0 {
                         // 若今日尚无记录，从数据库拾取最近一次历史请求的速率作为初始基准
                         if let Ok(mut stmt_last) = conn.prepare(
-                            "SELECT output_tokens, total_tokens, latency_ms, created_at FROM proxy_request_logs ORDER BY rowid DESC LIMIT 1"
+                            "SELECT output_tokens, latency_ms, created_at FROM proxy_request_logs
+                             WHERE output_tokens > 0 AND latency_ms >= 100 ORDER BY rowid DESC LIMIT 1"
                         ) {
                             if let Ok(mut last_rows) = stmt_last.query([]) {
                                 if let Ok(Some(row)) = last_rows.next() {
                                     let out_tok: i64 = row.get(0).unwrap_or(0);
-                                    let tot_tok: i64 = row.get(1).unwrap_or(0);
-                                    let lat_ms: i64 = row.get(2).unwrap_or(0);
-                                    let created_at: i64 = row.get(3).unwrap_or(0);
-                                    let lat_sec = (lat_ms as f64 / 1000.0).max(0.1);
-                                    let s = if out_tok > 0 {
-                                        out_tok as f64 / lat_sec
-                                    } else if tot_tok > 0 {
-                                        tot_tok as f64 / lat_sec
-                                    } else {
-                                        0.0
-                                    };
+                                    let lat_ms: i64 = row.get(1).unwrap_or(0);
+                                    let created_at: i64 = row.get(2).unwrap_or(0);
+                                    let s = Self::request_speed(out_tok, lat_ms).unwrap_or(0.0);
                                     if s > 0.0 {
                                         self.current_speed = s;
                                         self.last_speed_update = created_at as f64;
@@ -283,6 +285,15 @@ impl TokenCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_request_speed_ignores_unknown_latency() {
+        // 复现线上记录：476 个输出 Token、latency_ms 为 0，此前显示为 4760 T/s
+        assert_eq!(TokenCollector::request_speed(476, 0), None);
+        assert_eq!(TokenCollector::request_speed(476, 50), None);
+        assert_eq!(TokenCollector::request_speed(0, 5000), None);
+        assert_eq!(TokenCollector::request_speed(1510, 14847).map(|s| s.round()), Some(102.0));
+    }
 
     #[test]
     fn test_collector_speed() {

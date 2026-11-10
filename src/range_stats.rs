@@ -3,7 +3,7 @@ use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::collector::TokenCollector;
-use crate::config::HudConfig;
+use crate::config::{HudConfig, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RangePreset {
@@ -200,7 +200,7 @@ impl RangeStatsCalculator {
                     .unwrap_or_else(|| "2099-12-31".to_string());
 
                 let rollups_query = "
-                    SELECT model, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count
+                    SELECT model, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, cache_creation_tokens
                     FROM usage_daily_rollups
                     WHERE date >= ? AND date <= ?
                 ";
@@ -213,14 +213,13 @@ impl RangeStatsCalculator {
                         let out: i64 = row.get(4).unwrap_or(0);
                         let cache: i64 = row.get(5).unwrap_or(0);
                         let reqs: usize = row.get::<_, i64>(6).unwrap_or(1) as usize;
-                        Ok((m, cost, inp, out, cache, reqs))
+                        let cw: i64 = row.get(7).unwrap_or(0);
+                        Ok((m, cost, inp, out, cache, reqs, cw))
                     }) {
                         for r in r_rows.flatten() {
-                            let (raw_m, mut cost, inp, out, cache, reqs) = r;
+                            let (raw_m, cost, inp, out, cache, reqs, cw) = r;
                             let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                                cost = (inp as f64 * p.input + out as f64 * p.output + cache as f64 * p.cache_read) / 1_000_000.0;
-                            }
+                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
 
                             let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
                                 ModelRangeStat {
@@ -241,7 +240,7 @@ impl RangeStatsCalculator {
 
                 // 2. 查询 proxy_request_logs 明细表 (按精确时间戳过滤)
                 let query = "
-                    SELECT model, input_tokens, output_tokens, cache_read_tokens, total_cost_usd
+                    SELECT model, input_tokens, output_tokens, cache_read_tokens, total_cost_usd, cache_creation_tokens
                     FROM proxy_request_logs
                     WHERE created_at >= ? AND created_at <= ?
                 ";
@@ -253,14 +252,13 @@ impl RangeStatsCalculator {
                         let cache: i64 = row.get(3).unwrap_or(0);
                         let cost_str: Option<String> = row.get(4).ok();
                         let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        Ok((m, inp, out, cache, cost))
+                        let cw: i64 = row.get(5).unwrap_or(0);
+                        Ok((m, inp, out, cache, cost, cw))
                     }) {
                         for r in rows.flatten() {
-                            let (raw_m, inp, out, cache, mut cost) = r;
+                            let (raw_m, inp, out, cache, cost, cw) = r;
                             let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                                cost = (inp as f64 * p.input + out as f64 * p.output + cache as f64 * p.cache_read) / 1_000_000.0;
-                            }
+                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
 
                             let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
                                 ModelRangeStat {
@@ -284,13 +282,7 @@ impl RangeStatsCalculator {
             for r in &collector.records {
                 if r.created_at >= start_ts && r.created_at <= end_ts {
                     let clean_m = r.model.split('/').last().unwrap_or(&r.model).trim().to_string();
-                    let mut cost = r.total_cost_usd;
-                    if let Some(p) = config.get_custom_price_if_any(&clean_m) {
-                        cost = (r.input_tokens as f64 * p.input
-                            + r.output_tokens as f64 * p.output
-                            + r.cache_read_tokens as f64 * p.cache_read)
-                            / 1_000_000.0;
-                    }
+                    let cost = config.effective_cost(&clean_m, r.total_cost_usd, r.usage());
 
                     let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
                         ModelRangeStat {
@@ -375,7 +367,7 @@ impl RangeStatsCalculator {
             ) {
                 // 1. 查询 usage_daily_rollups
                 let rollups_query = "
-                    SELECT date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count
+                    SELECT date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, model, cache_creation_tokens
                     FROM usage_daily_rollups
                     WHERE date LIKE ?
                 ";
@@ -389,6 +381,9 @@ impl RangeStatsCalculator {
                         let out: i64 = row.get(3).unwrap_or(0);
                         let cache: i64 = row.get(4).unwrap_or(0);
                         let reqs: usize = row.get::<_, i64>(5).unwrap_or(1) as usize;
+                        let m: String = row.get(6).unwrap_or_default();
+                        let cw: i64 = row.get(7).unwrap_or(0);
+                        let cost = config.effective_cost(&m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
                         Ok((date_str, cost, inp + out + cache, reqs))
                     }) {
                         for r in r_rows.flatten() {
@@ -405,7 +400,7 @@ impl RangeStatsCalculator {
 
                 // 2. 查询 proxy_request_logs
                 let query = "
-                    SELECT created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens
+                    SELECT created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, model, cache_creation_tokens
                     FROM proxy_request_logs
                     WHERE created_at >= ? AND created_at <= ?
                 ";
@@ -417,6 +412,9 @@ impl RangeStatsCalculator {
                         let inp: i64 = row.get(2).unwrap_or(0);
                         let out: i64 = row.get(3).unwrap_or(0);
                         let cache: i64 = row.get(4).unwrap_or(0);
+                        let m: String = row.get(5).unwrap_or_default();
+                        let cw: i64 = row.get(6).unwrap_or(0);
+                        let cost = config.effective_cost(&m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
                         Ok((ts, cost, inp + out + cache))
                     }) {
                         for r in rows.flatten() {
@@ -438,13 +436,7 @@ impl RangeStatsCalculator {
                 if r.created_at >= start_ts && r.created_at <= end_ts {
                     if let Some(dt) = Local.timestamp_opt(r.created_at, 0).single() {
                         let d = dt.date_naive();
-                        let mut cost = r.total_cost_usd;
-                        if let Some(p) = config.get_custom_price_if_any(&r.model) {
-                            cost = (r.input_tokens as f64 * p.input
-                                + r.output_tokens as f64 * p.output
-                                + r.cache_read_tokens as f64 * p.cache_read)
-                                / 1_000_000.0;
-                        }
+                        let cost = config.effective_cost(&r.model, r.total_cost_usd, r.usage());
                         let entry = day_map.entry(d).or_insert_with(|| DaySummary { date: d, ..Default::default() });
                         entry.total_cost_usd += cost;
                         entry.total_tokens += r.total_tokens;
