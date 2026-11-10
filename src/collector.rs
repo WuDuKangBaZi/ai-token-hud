@@ -104,6 +104,7 @@ impl TokenCollector {
         let count = new_records.len();
         if count > 0 {
             let mut latest_speed = 0.0;
+            let mut latest_speed_ts = 0.0;
             for rec in new_records {
                 let latency_sec = (rec.latency_ms as f64 / 1000.0).max(0.1);
                 let speed = if rec.output_tokens > 0 {
@@ -115,6 +116,7 @@ impl TokenCollector {
                 };
                 if speed > 0.0 {
                     latest_speed = speed;
+                    latest_speed_ts = rec.created_at as f64;
                 }
                 if rec.created_at > self.last_sync_timestamp {
                     self.last_sync_timestamp = rec.created_at;
@@ -123,7 +125,7 @@ impl TokenCollector {
             }
             if latest_speed > 0.0 {
                 self.current_speed = latest_speed;
-                self.last_speed_update = Self::now_sec();
+                self.last_speed_update = latest_speed_ts;
             }
         }
         count
@@ -147,7 +149,6 @@ impl TokenCollector {
 
         let mut new_count = 0;
         let is_first_sync = self.last_sync_rowid == 0;
-        let now = Self::now_sec();
 
         // 以只读 URI 打开，避免锁住主进程
         if let Ok(conn) = Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI) {
@@ -202,6 +203,7 @@ impl TokenCollector {
                     ))
                 }) {
                     let mut latest_speed = 0.0;
+                    let mut latest_speed_ts = 0.0;
                     for r_res in rows.flatten() {
                         let (rowid, rec) = r_res;
                         if rowid > self.last_sync_rowid {
@@ -223,6 +225,7 @@ impl TokenCollector {
 
                         if speed > 0.0 {
                             latest_speed = speed;
+                            latest_speed_ts = rec.created_at as f64;
                         }
 
                         self.records.push(rec);
@@ -231,17 +234,18 @@ impl TokenCollector {
 
                     if latest_speed > 0.0 {
                         self.current_speed = latest_speed;
-                        self.last_speed_update = now;
+                        self.last_speed_update = latest_speed_ts;
                     } else if self.current_speed <= 0.0 {
                         // 若今日尚无记录，从数据库拾取最近一次历史请求的速率作为初始基准
                         if let Ok(mut stmt_last) = conn.prepare(
-                            "SELECT output_tokens, total_tokens, latency_ms FROM proxy_request_logs ORDER BY rowid DESC LIMIT 1"
+                            "SELECT output_tokens, total_tokens, latency_ms, created_at FROM proxy_request_logs ORDER BY rowid DESC LIMIT 1"
                         ) {
                             if let Ok(mut last_rows) = stmt_last.query([]) {
                                 if let Ok(Some(row)) = last_rows.next() {
                                     let out_tok: i64 = row.get(0).unwrap_or(0);
                                     let tot_tok: i64 = row.get(1).unwrap_or(0);
                                     let lat_ms: i64 = row.get(2).unwrap_or(0);
+                                    let created_at: i64 = row.get(3).unwrap_or(0);
                                     let lat_sec = (lat_ms as f64 / 1000.0).max(0.1);
                                     let s = if out_tok > 0 {
                                         out_tok as f64 / lat_sec
@@ -252,7 +256,7 @@ impl TokenCollector {
                                     };
                                     if s > 0.0 {
                                         self.current_speed = s;
-                                        self.last_speed_update = now;
+                                        self.last_speed_update = created_at as f64;
                                     }
                                 }
                             }
@@ -268,6 +272,11 @@ impl TokenCollector {
     pub fn get_realtime_speed(&mut self) -> i64 {
         // 恒定保持最近一次会话日志读取到的真实速率，直到下一次日志刷新才改变 (不回落归零)
         self.current_speed.round() as i64
+    }
+
+    /// 距最近一次产生速率的请求已过去的秒数 (用于 HUD 区分「生成中」与「空闲」)
+    pub fn seconds_since_last_activity(&self) -> f64 {
+        Self::now_sec() - self.last_speed_update
     }
 }
 

@@ -438,8 +438,15 @@ impl RangeStatsCalculator {
                 if r.created_at >= start_ts && r.created_at <= end_ts {
                     if let Some(dt) = Local.timestamp_opt(r.created_at, 0).single() {
                         let d = dt.date_naive();
+                        let mut cost = r.total_cost_usd;
+                        if let Some(p) = config.get_custom_price_if_any(&r.model) {
+                            cost = (r.input_tokens as f64 * p.input
+                                + r.output_tokens as f64 * p.output
+                                + r.cache_read_tokens as f64 * p.cache_read)
+                                / 1_000_000.0;
+                        }
                         let entry = day_map.entry(d).or_insert_with(|| DaySummary { date: d, ..Default::default() });
-                        entry.total_cost_usd += r.total_cost_usd;
+                        entry.total_cost_usd += cost;
                         entry.total_tokens += r.total_tokens;
                         entry.request_count += 1;
                     }

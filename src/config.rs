@@ -48,6 +48,12 @@ pub struct HudConfig {
     /// 数据源模式: "auto" (智能探测: 有 CC Switch 则优先，否则原生扫描), "ccswitch" (强制 CC Switch), "native" (强制原生扫描)
     #[serde(default = "default_driver_mode")]
     pub driver_mode: String,
+    /// 每日预算 (美元，0 表示不启用)，HUD 横条按今日消耗占比着色并绘制进度线
+    #[serde(default)]
+    pub daily_budget_usd: f64,
+    /// 上次退出时 HUD 横条的屏幕位置 (逻辑像素)，启动时恢复
+    #[serde(default)]
+    pub hud_pos: Option<[f32; 2]>,
     pub visible_tools: HashMap<String, bool>,
     pub custom_pricing: HashMap<String, ModelPrice>,
 }
@@ -70,6 +76,8 @@ impl Default for HudConfig {
             auto_fetch_rate: true,
             last_rate_fetch_time: None,
             driver_mode: "auto".to_string(),
+            daily_budget_usd: 0.0,
+            hud_pos: None,
             visible_tools,
             custom_pricing: HashMap::new(),
         }
@@ -158,6 +166,15 @@ impl HudConfig {
         }
 
         Err(if last_err.is_empty() { "网络连接超时或无法访问汇率服务".to_string() } else { last_err })
+    }
+
+    /// 今日消耗占每日预算的比例 (未启用预算时为 None)
+    pub fn budget_ratio(&self, today_usd: f64) -> Option<f64> {
+        if self.daily_budget_usd > 0.0 {
+            Some(today_usd / self.daily_budget_usd)
+        } else {
+            None
+        }
     }
 
     /// 当前币种前缀符号
@@ -419,6 +436,17 @@ mod tests {
         assert_eq!(cfg.currency, "USD");
         assert_eq!(cfg.usd_to_cny_rate, 7.25);
         assert!(cfg.auto_fetch_rate);
+        assert_eq!(cfg.daily_budget_usd, 0.0);
+        assert!(cfg.hud_pos.is_none());
+    }
+
+    #[test]
+    fn test_budget_ratio() {
+        let mut cfg = HudConfig::default();
+        assert!(cfg.budget_ratio(5.0).is_none());
+        cfg.daily_budget_usd = 20.0;
+        assert_eq!(cfg.budget_ratio(5.0), Some(0.25));
+        assert_eq!(cfg.budget_ratio(30.0), Some(1.5));
     }
 
     #[test]

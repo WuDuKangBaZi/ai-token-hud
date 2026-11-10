@@ -9,24 +9,33 @@ mod watcher;
 mod native_scanner;
 mod tray;
 mod range_stats;
+mod theme;
 mod app;
 
 use eframe::egui;
 use app::TokenHudApp;
 
 fn main() {
+    let config = config::HudConfig::load();
+
     // 游戏加加风格微型横条悬浮窗配置 (高 36px，初始宽 640px，自适应多工具扩充)
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("AI Token HUD Bar")
+        .with_inner_size([640.0, 36.0])
+        .with_min_inner_size([420.0, 36.0])
+        .with_max_inner_size([3840.0, 900.0])
+        .with_decorations(false)        // 无边框
+        .with_transparent(true)        // 透明磨砂
+        .with_taskbar(false)           // 不在任务栏显示图标
+        .with_resizable(true);         // 允许根据展示工具数量或金额下拉自动伸缩尺寸
+    if config.always_on_top {
+        viewport = viewport.with_always_on_top(); // 类似游戏 OSD 置顶常驻
+    }
+    if let Some([x, y]) = config.hud_pos {
+        viewport = viewport.with_position([x, y]); // 恢复上次拖拽停靠的位置
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("AI Token HUD Bar")
-            .with_inner_size([640.0, 36.0])
-            .with_min_inner_size([420.0, 36.0])
-            .with_max_inner_size([3840.0, 900.0])
-            .with_decorations(false)        // 无边框
-            .with_transparent(true)        // 透明磨砂
-            .with_always_on_top()          // 类似游戏 OSD 置顶常驻
-            .with_taskbar(false)           // 不在任务栏显示图标
-            .with_resizable(true),         // 允许根据展示工具数量或金额下拉自动伸缩尺寸
+        viewport,
         ..Default::default()
     };
 
@@ -65,6 +74,7 @@ fn main() {
             }
 
             cc.egui_ctx.set_fonts(fonts);
+            theme::apply(&cc.egui_ctx);
             Ok(Box::new(TokenHudApp::new(&cc.egui_ctx)))
         }),
     ) {

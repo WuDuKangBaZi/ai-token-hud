@@ -10,6 +10,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 pub static OPEN_SETTINGS_FLAG: AtomicBool = AtomicBool::new(false);
+/// 托盘菜单请求将 HUD 复位到屏幕顶部居中 (横条被拖出屏幕或显示器变更后找回)
+pub static RESET_POSITION_FLAG: AtomicBool = AtomicBool::new(false);
 
 pub fn find_hud_hwnd() -> HWND {
     let title: Vec<u16> = OsStr::new("AI Token HUD Bar")
@@ -87,7 +89,7 @@ pub struct SystemTray {
 }
 
 impl SystemTray {
-    pub fn new() -> Option<Self> {
+    pub fn new(ctx: eframe::egui::Context) -> Option<Self> {
         // 生成 32x32 程序内置高科技感托盘图标 (外环深灰，中心科技天蓝)
         let width = 32;
         let height = 32;
@@ -119,14 +121,17 @@ impl SystemTray {
         let menu = Menu::new();
         let show_item = MenuItem::new("🖥️ 显示 / 隐藏悬浮窗", true, None);
         let settings_item = MenuItem::new("⚙️ 设置与详细统计", true, None);
+        let reset_item = MenuItem::new("📍 复位到屏幕顶部居中", true, None);
         let quit_item = MenuItem::new("🚪 退出 AI Token HUD", true, None);
 
         let show_item_id = show_item.id().clone();
         let settings_item_id = settings_item.id().clone();
+        let reset_id = reset_item.id().clone();
         let quit_item_id = quit_item.id().clone();
 
         let _ = menu.append(&show_item);
         let _ = menu.append(&settings_item);
+        let _ = menu.append(&reset_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
@@ -149,7 +154,12 @@ impl SystemTray {
                 toggle_hud_visibility();
             } else if event.id == settings_id {
                 show_hud_and_open_settings();
+            } else if event.id == reset_id {
+                RESET_POSITION_FLAG.store(true, Ordering::SeqCst);
+                show_hud();
             }
+            // 窗口已可见时 ShowWindow 不会触发重绘，主动唤醒以立即消费上面的标记
+            ctx.request_repaint();
         }));
 
         tray_icon::TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {

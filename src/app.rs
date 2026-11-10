@@ -7,6 +7,12 @@ use crate::collector::TokenCollector;
 use crate::stats::{StatsEngine, ToolStats, ModelStats, ModelPeriodCost};
 use crate::detector::ToolDetector;
 use crate::history_cache::HistoryCache;
+use crate::theme;
+
+/// 超过该秒数没有新请求即视为空闲，RATE 置灰
+const IDLE_AFTER_SECS: f64 = 60.0;
+/// HUD 横条右侧按钮区 (分割线 + 4 个图标按钮) 的固定宽度
+const HUD_BUTTONS_WIDTH: f32 = 96.0;
 
 pub struct TokenHudApp {
     pub config: HudConfig,
@@ -34,11 +40,20 @@ pub struct TokenHudApp {
     pub cached_tools: Vec<ToolStats>,
     pub cached_models: Vec<ModelStats>,
     pub cached_model_period_costs: Vec<ModelPeriodCost>,
-    pub cached_cache_rate: f64,
+    /// 今日 Prompt 缓存命中率 (今日尚无请求时为 None，HUD 显示 "--")
+    pub cached_cache_rate: Option<f64>,
     pub cost_dropdown_open: bool,
     pub cost_dropdown_hover_time: Option<Instant>,
     pub current_bar_width: f32,
     pub current_bar_height: f32,
+    /// 上一帧实测的横条指标内容宽度，用于让窗口宽度贴合真实内容
+    pub measured_content_width: f32,
+    /// 「完整下钻明细」的视角：false 按工具，true 按模型
+    pub drilldown_by_model: bool,
+    /// 最近一次复制表格到剪贴板的时间 (用于短暂显示「已复制」)
+    pub copied_at: Option<Instant>,
+    /// 已移动但尚未落盘的 HUD 位置及其首次观测时间
+    pub pending_pos: Option<(egui::Pos2, Instant)>,
     /// 操作系统文件系统修改事件监控器 (ReadDirectoryChangesW)
     pub db_watcher: Option<crate::watcher::DbWatcher>,
     /// 右下角系统托盘组件
@@ -65,7 +80,7 @@ impl TokenHudApp {
         app.db_watcher = Some(crate::watcher::DbWatcher::new(&app.collector.db_path, move || {
             ctx_clone.request_repaint();
         }));
-        app.tray = crate::tray::SystemTray::new();
+        app.tray = crate::tray::SystemTray::new(ctx.clone());
 
         // 启动时按配置自动获取网络公开接口最新汇率
         if app.config.auto_fetch_rate {
@@ -131,11 +146,15 @@ impl TokenHudApp {
             cached_tools: Vec::new(),
             cached_models: Vec::new(),
             cached_model_period_costs: Vec::new(),
-            cached_cache_rate: 0.0,
+            cached_cache_rate: None,
             cost_dropdown_open: false,
             cost_dropdown_hover_time: None,
             current_bar_width: 0.0,
             current_bar_height: 36.0,
+            measured_content_width: 0.0,
+            drilldown_by_model: false,
+            copied_at: None,
+            pending_pos: None,
         };
 
         app.refresh_stats();
@@ -143,9 +162,18 @@ impl TokenHudApp {
     }
 
     pub fn calculate_target_width(&self) -> f32 {
+        // 金额模式的下拉明细表格需要 650px 列宽，横条不得窄于此
+        let min_width: f32 = if self.config.view_mode == "cost" { 670.0 } else { 420.0 };
+
+        if self.measured_content_width > 0.0 {
+            // 实测内容宽度 + 右侧按钮区 + 两侧内边距，向上取整到 10px 避免数字位数变化引起的抖动
+            let w = self.measured_content_width + HUD_BUTTONS_WIDTH + 34.0;
+            return ((w / 10.0).ceil() * 10.0).max(min_width);
+        }
+
+        // 首帧尚未实测时的估算值
         if self.config.view_mode == "cost" {
-            // 纯金额模式极简紧凑：只展示 RATE、TODAY、TOTAL、CACHE
-            return 670.0;
+            return min_width;
         }
 
         let base_width = 485.0; // 抓手(24) + RATE(85) + TODAY(180) + CACHE(85) + Buttons(80) + Margins(31)
@@ -176,17 +204,151 @@ impl TokenHudApp {
         self.cached_models = StatsEngine::get_by_model_tree(&self.collector, &self.config, &self.history_cache);
         self.cached_model_period_costs = StatsEngine::get_model_period_costs(&self.collector, &self.config);
 
-        // 计算实时 Prompt 缓存命中率 (优先以今日数据计算，若今日尚无数据则以历史全量兜底)
+        // 计算今日 Prompt 缓存命中率 (今日尚无数据时不展示虚构数值)
         let mut cache_tok: i64 = 0;
         let mut prompt_tok: i64 = 0;
         for r in &self.collector.records {
             cache_tok += r.cache_read_tokens;
             prompt_tok += r.input_tokens + r.cache_read_tokens;
         }
-        if prompt_tok > 0 {
-            self.cached_cache_rate = (cache_tok as f64 / prompt_tok as f64) * 100.0;
+        self.cached_cache_rate = if prompt_tok > 0 {
+            Some((cache_tok as f64 / prompt_tok as f64) * 100.0)
         } else {
-            self.cached_cache_rate = 96.1; // 历史基准默认值
+            None
+        };
+    }
+
+    fn format_ago(secs: f64) -> String {
+        if secs < 3600.0 {
+            format!("{} 分钟", (secs / 60.0).max(1.0) as i64)
+        } else if secs < 86400.0 {
+            format!("{} 小时", (secs / 3600.0) as i64)
+        } else {
+            format!("{} 天", (secs / 86400.0) as i64)
+        }
+    }
+
+    /// 切换 HUD 展示模式并持久化 ("tool" | "model" | "cost")
+    fn set_view_mode(&mut self, mode: &str) {
+        if self.config.view_mode != mode {
+            self.config.view_mode = mode.to_string();
+            self.config.save();
+            self.refresh_stats();
+        }
+    }
+
+    /// 切换主结算币种并持久化 ("USD" | "CNY")
+    fn set_currency(&mut self, currency: &str) {
+        if self.config.currency != currency {
+            self.config.currency = currency.to_string();
+            self.config.save();
+            self.refresh_stats();
+        }
+    }
+
+    /// 将当前筛选范围的模型明细导出为制表符分隔文本 (可直接粘贴进 Excel / 飞书表格)
+    pub fn range_table_tsv(&self) -> String {
+        let mut out = String::from("模型\t输入Token\t输出Token\t缓存读取\t总Token\t金额(USD)\t金额(CNY)\t请求数\n");
+        if let Some(s) = &self.calendar_state.summary {
+            for m in &s.models {
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\n",
+                    m.model, m.input_tokens, m.output_tokens, m.cache_read_tokens, m.total_tokens,
+                    m.total_cost_usd, m.total_cost_usd * self.config.usd_to_cny_rate, m.request_count
+                ));
+            }
+            out.push_str(&format!(
+                "合计\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\n",
+                s.total_input_tokens, s.total_output_tokens, s.total_cache_read_tokens, s.total_tokens,
+                s.total_cost_usd, s.total_cost_usd * self.config.usd_to_cny_rate, s.total_requests
+            ));
+        }
+        out
+    }
+
+    /// 渲染 📊 完整下钻明细 (按工具或按模型的累计消耗卡片，附金额占比条与来源明细)
+    pub fn render_drilldown(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("累计消耗下钻分析").strong().size(13.0).color(theme::WHITE));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.selectable_label(self.drilldown_by_model, "🧠 按模型").clicked() {
+                    self.drilldown_by_model = true;
+                }
+                if ui.selectable_label(!self.drilldown_by_model, "🛠️ 按工具").clicked() {
+                    self.drilldown_by_model = false;
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        let cfg = &self.config;
+        let cost_text = |usd: f64| format!("{} {}", cfg.format_cost(usd), cfg.format_secondary_cost(usd));
+        let share_of = |part: f64, total: f64| if total > 0.0 { (part / total) as f32 } else { 0.0 };
+
+        // 卡片头部：名称 + 请求数 / Token / 金额，下方为占全部金额的份额条
+        let card_header = |ui: &mut egui::Ui, name: &str, color: Color32, requests: usize, tokens: i64, cost: f64, share: f32| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).strong().size(12.5).color(color));
+                ui.label(RichText::new(format!("{:.1}%", share * 100.0)).size(10.5).color(theme::MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(cost_text(cost)).color(theme::YELLOW).strong());
+                    ui.label(RichText::new(StatsEngine::format_compact(tokens)).color(theme::CYAN));
+                    ui.label(RichText::new(format!("{} 次", requests)).size(10.5).color(theme::MUTED));
+                });
+            });
+            theme::share_bar(ui, ui.available_width(), share, color);
+            ui.add_space(2.0);
+        };
+
+        if self.drilldown_by_model {
+            let grand: f64 = self.cached_models.iter().map(|m| m.total_cost_usd).sum();
+            for m in &self.cached_models {
+                let color = theme::model_color(&m.short_name);
+                theme::card().show(ui, |ui| {
+                    card_header(ui, &m.display_name, color, m.request_count, m.total_tokens, m.total_cost_usd, share_of(m.total_cost_usd, grand));
+                    for t in &m.tools {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("来自 {}", t.name)).size(11.0).color(theme::tool_color(&t.tool_id)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(cost_text(t.cost)).size(11.0).color(theme::TEXT));
+                                ui.label(RichText::new(StatsEngine::format_compact(t.tokens)).size(11.0).color(theme::MUTED));
+                                ui.label(RichText::new(format!("{}%", t.percentage)).size(10.5).color(theme::DIM));
+                            });
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if self.cached_models.is_empty() {
+                ui.label(RichText::new("暂无模型调用记录").color(theme::MUTED));
+            }
+        } else {
+            let grand: f64 = self.cached_tools.iter().map(|t| t.total_cost_usd).sum();
+            for t in &self.cached_tools {
+                let color = theme::tool_color(&t.id);
+                theme::card().show(ui, |ui| {
+                    card_header(ui, &t.name, color, t.request_count, t.total_tokens, t.total_cost_usd, share_of(t.total_cost_usd, grand));
+                    for m in &t.models {
+                        ui.horizontal(|ui| {
+                            let short = StatsEngine::short_model_name(&m.model);
+                            ui.label(RichText::new(&m.model).size(11.0).color(theme::model_color(&short)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(cost_text(m.cost)).size(11.0).color(theme::TEXT));
+                                ui.label(RichText::new(StatsEngine::format_compact(m.tokens)).size(11.0).color(theme::MUTED));
+                                ui.label(RichText::new(format!("{} 次", m.count)).size(10.5).color(theme::DIM));
+                            });
+                        });
+                    }
+                    if t.models.is_empty() {
+                        ui.label(RichText::new("暂无调用记录").size(11.0).color(theme::DIM));
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if self.cached_tools.is_empty() {
+                ui.label(RichText::new("未勾选任何工具，可在「驱动与监控工具」中开启").color(theme::MUTED));
+            }
         }
     }
 
@@ -219,7 +381,7 @@ impl TokenHudApp {
         ui.add_space(4.0);
 
         // 2. 日历视图区域 (按月份交互绘制)
-        ui.group(|ui| {
+        theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             // 2.1 日历头部月份切换与操作
@@ -296,6 +458,8 @@ impl TokenHudApp {
             let total_slots = (start_weekday as usize) + (days_in_month as usize);
             let total_rows = (total_slots + 6) / 7;
             let mut clicked_date: Option<chrono::NaiveDate> = None;
+            // 当月单日金额峰值，作为热力底色的归一化基准
+            let month_max = self.calendar_state.month_days.values().map(|d| d.total_cost_usd).fold(0.0, f64::max);
 
             for row in 0..total_rows {
                 ui.horizontal(|ui| {
@@ -312,19 +476,20 @@ impl TokenHudApp {
                             let in_range = date >= active_s && date <= active_e;
                             let day_stat = self.calendar_state.month_days.get(&date).cloned();
 
-                            // 单元格背景及描边
-                            let bg_color = if in_range {
-                                Color32::from_rgb(30, 58, 95)
-                            } else if is_today {
-                                Color32::from_rgb(20, 35, 55)
+                            // 单元格背景及描边：底色表达当日金额热力，描边表达今日 / 选中范围
+                            let day_cost = day_stat.as_ref().map_or(0.0, |s| s.total_cost_usd);
+                            let bg_color = if day_cost > 0.001 && month_max > 0.0 {
+                                theme::heat_color((day_cost / month_max) as f32)
+                            } else if in_range {
+                                Color32::from_rgb(24, 40, 62)
                             } else {
                                 Color32::from_rgb(26, 30, 39)
                             };
 
                             let border_stroke = if is_today {
-                                Stroke::new(1.2, Color32::from_rgb(56, 189, 248))
+                                Stroke::new(1.5, Color32::from_rgb(56, 189, 248))
                             } else if in_range {
-                                Stroke::new(1.0, Color32::from_rgb(96, 165, 250))
+                                Stroke::new(1.2, Color32::from_rgb(96, 165, 250))
                             } else {
                                 Stroke::new(0.5, Color32::from_rgb(50, 56, 68))
                             };
@@ -385,7 +550,7 @@ impl TokenHudApp {
 
         // 3. 统计汇总摘要卡片 (当前生效范围指标汇总)
         if let Some(summary) = &self.calendar_state.summary {
-            ui.group(|ui| {
+            theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("📊 当前筛选:").strong().size(12.0).color(Color32::from_rgb(56, 189, 248)));
@@ -393,41 +558,33 @@ impl TokenHudApp {
                 });
                 ui.add_space(4.0);
 
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::Vec2::new(8.0, 4.0);
-
-                    // 1. 总 Token
-                    ui.group(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("🪙 总 Token 消耗").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                            ui.label(RichText::new(StatsEngine::format_compact(summary.total_tokens)).strong().size(13.5).color(Color32::from_rgb(56, 189, 248)));
-                        });
-                    });
-
-                    // 2. 累计金额
-                    ui.group(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("💰 累计金额 (USD / CNY)").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                            let cost_str = format!("{} {}", self.config.format_cost(summary.total_cost_usd), self.config.format_secondary_cost(summary.total_cost_usd));
-                            ui.label(RichText::new(cost_str).strong().size(13.5).color(Color32::from_rgb(250, 204, 21)));
-                        });
-                    });
-
-                    // 3. 总请求数
-                    ui.group(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("⚡ 请求总数").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                            ui.label(RichText::new(format!("{} 次", summary.total_requests)).strong().size(13.5).color(Color32::from_rgb(74, 222, 128)));
-                        });
-                    });
-
-                    // 4. 模型数
-                    ui.group(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new("🧠 活跃模型数").size(10.0).color(Color32::from_rgb(156, 163, 175)));
-                            ui.label(RichText::new(format!("{} 个", summary.models.len())).strong().size(13.5).color(Color32::from_rgb(192, 132, 252)));
-                        });
-                    });
+                // 四个等宽指标块：金额、Token、请求数、缓存命中率
+                let prompt_tok = summary.total_input_tokens + summary.total_cache_read_tokens;
+                let cache_rate = if prompt_tok > 0 {
+                    format!("{:.1}%", summary.total_cache_read_tokens as f64 / prompt_tok as f64 * 100.0)
+                } else {
+                    "--".to_string()
+                };
+                let tiles = [
+                    ("💰 累计金额", self.config.format_cost(summary.total_cost_usd), self.config.format_secondary_cost(summary.total_cost_usd), theme::YELLOW),
+                    ("🪙 总 Token", StatsEngine::format_compact(summary.total_tokens), format!("{} 个模型", summary.models.len()), theme::CYAN),
+                    ("⚡ 请求总数", format!("{}", summary.total_requests), "次调用".to_string(), theme::GREEN),
+                    ("♻ 缓存命中率", cache_rate, format!("读取 {}", StatsEngine::format_compact(summary.total_cache_read_tokens)), theme::PURPLE),
+                ];
+                ui.columns(tiles.len(), |cols| {
+                    for (col, (title, value, sub, color)) in cols.iter_mut().zip(tiles) {
+                        Frame::none()
+                            .fill(Color32::from_rgb(22, 25, 32))
+                            .rounding(Rounding::same(5.0))
+                            .inner_margin(Margin::symmetric(8.0, 6.0))
+                            .show(col, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(RichText::new(title).size(10.0).color(theme::LABEL_GREY));
+                                ui.label(RichText::new(value).strong().size(16.0).color(color));
+                                ui.label(RichText::new(sub).size(10.0).color(theme::MUTED));
+                            });
+                    }
                 });
             });
         }
@@ -435,13 +592,22 @@ impl TokenHudApp {
         ui.add_space(6.0);
 
         // 4. 各模型消耗明细表格
-        ui.group(|ui| {
+        theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             // 搜索与过滤
             ui.horizontal(|ui| {
                 ui.label(RichText::new("🧠 各模型消耗明细 (按金额降序):").strong().size(12.0).color(Color32::from_rgb(250, 204, 21)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let just_copied = self.copied_at.is_some_and(|t| t.elapsed().as_secs() < 2);
+                    let copy_label = if just_copied { "✔ 已复制" } else { "📋 复制表格" };
+                    if ui.button(RichText::new(copy_label).size(11.0))
+                        .on_hover_text("复制当前筛选范围的完整明细 (制表符分隔，可直接粘贴进 Excel)")
+                        .clicked() {
+                        ui.ctx().copy_text(self.range_table_tsv());
+                        self.copied_at = Some(Instant::now());
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+                    }
                     if !self.calendar_state.search_query.is_empty() {
                         if ui.button("清空").clicked() {
                             self.calendar_state.search_query.clear();
@@ -516,27 +682,11 @@ impl TokenHudApp {
                 } else {
                     for m in matched_models {
                         let short_name = StatsEngine::short_model_name(&m.model);
-                        let model_color = if short_name.starts_with("Opus")
-                            || short_name.starts_with("Sonnet")
-                            || short_name.starts_with("Haiku")
-                            || short_name.starts_with("Fable")
-                        {
-                            Color32::from_rgb(251, 146, 60)
-                        } else if short_name.starts_with("Gemini") {
-                            Color32::from_rgb(56, 189, 248)
-                        } else if short_name.starts_with("GPT")
-                            || short_name.starts_with("o1")
-                            || short_name.starts_with("o3")
-                            || short_name.starts_with("Codex")
-                        {
-                            Color32::from_rgb(16, 185, 129)
-                        } else if short_name.starts_with("DeepSeek") {
-                            Color32::from_rgb(59, 130, 246)
-                        } else {
-                            Color32::from_rgb(192, 132, 252)
-                        };
+                        let model_color = theme::model_color(&short_name);
 
-                        ui.horizontal(|ui| {
+                        // 预留行底色图层 (绘制在文字之下)
+                        let row_bg = ui.painter().add(egui::Shape::Noop);
+                        let row = ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::Vec2::new(col_gap, 0.0);
                             let tip = format!("🧠 模型: {}\n全称: {}\n原始: {}", short_name, m.display_name, m.model);
                             render_tcell(ui, col_w_model, RichText::new(&short_name).color(model_color).strong().size(11.0), false, Some(tip));
@@ -553,6 +703,10 @@ impl TokenHudApp {
 
                             render_tcell(ui, col_w_req, RichText::new(format!("{}", m.request_count)).color(Color32::from_rgb(156, 163, 175)).size(11.0), true, None);
                         });
+                        // 鼠标所在行整行高亮，便于横向对照各列
+                        if ui.rect_contains_pointer(row.response.rect) {
+                            ui.painter().set(row_bg, egui::Shape::rect_filled(row.response.rect.expand2(egui::vec2(4.0, 1.0)), Rounding::same(3.0), theme::ROW_HOVER));
+                        }
                     }
 
                     // 4.3 汇总合计行
@@ -584,9 +738,42 @@ impl eframe::App for TokenHudApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(ctx);
+    }
+}
+
+impl TokenHudApp {
+    /// 整帧界面逻辑 (不依赖 eframe::Frame，便于在无窗口环境下做冒烟测试)
+    pub fn ui(&mut self, ctx: &egui::Context) {
         // 1. 检查托盘菜单触发的打开设置窗口指令 (直接响应 Win32 消息)
         if crate::tray::OPEN_SETTINGS_FLAG.swap(false, std::sync::atomic::Ordering::SeqCst) {
             self.show_settings_window = true;
+        }
+        if crate::tray::RESET_POSITION_FLAG.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let monitor_w = ctx.input(|i| i.viewport().monitor_size).map_or(1920.0, |s| s.x);
+            let x = ((monitor_w - self.current_bar_width) / 2.0).max(0.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, 0.0)));
+        }
+
+        // 记忆 HUD 位置：位置变化并静止 500ms 后才落盘，避免拖拽过程中逐帧写配置
+        let outer_min = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
+        if let Some(pos) = outer_min.filter(|p| p.x > -10000.0 && p.y > -10000.0) {
+            let saved = self.config.hud_pos.map(|[x, y]| egui::pos2(x, y));
+            if saved.map_or(true, |s| s.distance(pos) > 1.0) {
+                match self.pending_pos {
+                    Some((p, since)) if p.distance(pos) <= 1.0 => {
+                        if since.elapsed().as_millis() >= 500 {
+                            self.config.hud_pos = Some([pos.x, pos.y]);
+                            self.config.save();
+                            self.pending_pos = None;
+                        }
+                    }
+                    _ => self.pending_pos = Some((pos, Instant::now())),
+                }
+                ctx.request_repaint_after(std::time::Duration::from_millis(600));
+            } else {
+                self.pending_pos = None;
+            }
         }
 
         // 2. 检查是否有异步汇率抓取结果返回
@@ -641,7 +828,7 @@ impl eframe::App for TokenHudApp {
         let target_height = if self.config.view_mode == "cost" && self.cost_dropdown_open {
             340.0
         } else if self.show_context_menu {
-            150.0
+            210.0
         } else {
             36.0
         };
@@ -662,13 +849,28 @@ impl eframe::App for TokenHudApp {
         }
 
         // 颜色定义 (参考游戏加加 OSD 调色板)
-        let c_label_grey = Color32::from_rgb(156, 163, 175); // 标签灰色
-        let c_green = Color32::from_rgb(74, 222, 128);       // FPS 绿色
-        let c_coral = Color32::from_rgb(248, 113, 113);      // 橙粉色
-        let c_yellow = Color32::from_rgb(250, 204, 21);      // 警示黄色
-        let c_cyan = Color32::from_rgb(56, 189, 248);        // 科技天蓝
-        let c_white = Color32::from_rgb(243, 244, 246);      // 主文字白
-        let c_div = Color32::from_rgb(60, 64, 75);          // 垂直分割线
+        let c_label_grey = theme::LABEL_GREY;
+        let c_green = theme::GREEN;
+        let c_coral = theme::CORAL;
+        let c_yellow = theme::YELLOW;
+        let c_cyan = theme::CYAN;
+        let c_white = theme::WHITE;
+
+        // 今日预算进度 (未启用预算时为 None)
+        let budget_ratio = self.config.budget_ratio(self.cached_today_usd);
+        let c_today = budget_ratio.map_or(c_yellow, theme::budget_color);
+        let today_tip = match budget_ratio {
+            Some(r) => format!(
+                "今日消耗 {} / 每日预算 {} ({:.0}%)",
+                self.config.format_cost(self.cached_today_usd),
+                self.config.format_cost(self.config.daily_budget_usd),
+                r * 100.0
+            ),
+            None => "今日消耗 (可在「展现与偏好」中设置每日预算)".to_string(),
+        };
+        // 最近 60 秒内有新请求才视为生成中，否则 RATE 置灰表示空闲
+        let idle_secs = self.collector.seconds_since_last_activity();
+        let is_active = idle_secs < IDLE_AFTER_SECS;
 
         // =========================================================================
         // 🎮 主悬浮窗：游戏加加风格的极简横条 HUD (仅 34px 高) + 金额模式向下展开明细
@@ -696,8 +898,20 @@ impl eframe::App for TokenHudApp {
                     bar_frame.show(ui, |ui| {
                         let full_rect = ui.max_rect();
 
+                        // 每日预算进度线：贴横条底边的 2px 细线，颜色随占比由黄转橙再转红
+                        if let Some(r) = budget_ratio {
+                            let track = egui::Rect::from_min_max(
+                                egui::pos2(bar_rect.min.x + 6.0, bar_rect.max.y - 3.0),
+                                egui::pos2(bar_rect.max.x - 6.0, bar_rect.max.y - 1.0),
+                            );
+                            let mut fill = track;
+                            fill.set_width(track.width() * (r as f32).clamp(0.0, 1.0));
+                            ui.painter().rect_filled(track, Rounding::same(1.0), Color32::from_rgb(45, 50, 61));
+                            ui.painter().rect_filled(fill, Rounding::same(1.0), c_today);
+                        }
+
                         // 水平切分为左右两个独立同高区域 (同在这一行内，绝对不会产生换行或高度推移)
-                        let right_w = 82.0;
+                        let right_w = HUD_BUTTONS_WIDTH;
                         let left_rect = egui::Rect::from_min_max(
                             full_rect.min,
                             egui::pos2(full_rect.max.x - right_w, full_rect.max.y),
@@ -765,30 +979,33 @@ impl eframe::App for TokenHudApp {
                         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
                             ui.style_mut().interaction.selectable_labels = false;
                             ui.horizontal_centered(|ui| {
-                                ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                                ui.colored_label(c_div, "|");
+                                ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                                theme::vdiv(ui);
+                                ui.add_space(3.0);
 
-                                let btn_cal = ui.button(RichText::new("📅").color(Color32::from_rgb(56, 189, 248)).size(11.5))
-                                    .on_hover_text("打开记录详情查看器 (日历与多范围筛选)");
-                                if btn_cal.clicked() {
+                                let hover_fill = Color32::from_rgb(55, 65, 81);
+                                if theme::icon_button(ui, "📅", hover_fill)
+                                    .on_hover_text("打开记录详情查看器 (日历与多范围筛选)")
+                                    .clicked() {
                                     self.show_settings_window = true;
                                     self.settings_tab = 0;
                                     self.calendar_state.refresh(&self.collector, &self.config);
                                 }
 
-                                let btn_cfg = ui.button(RichText::new("⚙").color(Color32::from_rgb(148, 163, 184)).size(12.0))
-                                    .on_hover_text("打开详细设置与统计 (亦可双击悬浮窗)");
-                                if btn_cfg.clicked() {
+                                if theme::icon_button(ui, "⚙", hover_fill)
+                                    .on_hover_text("打开详细设置与统计 (亦可双击悬浮窗)")
+                                    .clicked() {
                                     self.show_settings_window = !self.show_settings_window;
                                 }
 
-                                if ui.button(RichText::new("🗕").color(Color32::from_rgb(148, 163, 184)).size(11.0))
+                                if theme::icon_button(ui, "🗕", hover_fill)
                                     .on_hover_text("收缩到右下角托盘 (点击右下角托盘图标可恢复)")
                                     .clicked() {
                                     crate::tray::hide_hud();
                                 }
 
-                                if ui.button(RichText::new("✕").color(Color32::from_rgb(148, 163, 184)).size(11.0))
+                                // 退出按钮悬浮时变红，与其余按钮区分，降低误触
+                                if theme::close_button(ui)
                                     .on_hover_text("关闭退出 AI Token HUD (亦可在悬浮窗右键控制退出)")
                                     .clicked() {
                                     std::process::exit(0);
@@ -799,7 +1016,7 @@ impl eframe::App for TokenHudApp {
                         // 4. 左侧至中间区域连续平铺展示各项监控指标 (分配在独立的左侧 Rect，与右侧同一水平线)
                         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
                             ui.style_mut().interaction.selectable_labels = false;
-                            ui.horizontal_centered(|ui| {
+                            let content = ui.horizontal_centered(|ui| {
                                 ui.spacing_mut().item_spacing = Vec2::new(7.0, 0.0);
 
                                 // ================= 拖拽手柄点阵图标 (触感提示) =================
@@ -838,65 +1055,54 @@ impl eframe::App for TokenHudApp {
                                 }
 
                                 // ================= 分段 1: 实时速率 (类似 FPS 103) =================
+                                // 活动状态指示灯：生成中为绿色，空闲为灰色
+                                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                ui.painter().circle_filled(dot_rect.center(), 3.0, if is_active { c_green } else { theme::DIM });
+
                                 ui.label(RichText::new("RATE").color(c_label_grey).strong().size(11.0));
+                                let rate_tip = if is_active {
+                                    "最近一次请求的输出生成速率 (Token/秒)".to_string()
+                                } else if idle_secs < 86400.0 * 365.0 {
+                                    format!("空闲中 · 最近一次请求在 {} 前，速率为当时的数值", Self::format_ago(idle_secs))
+                                } else {
+                                    "空闲中 · 暂无请求记录".to_string()
+                                };
                                 ui.label(
                                     RichText::new(format!("{} T/s", self.cached_speed))
-                                        .color(c_green)
+                                        .color(if is_active { c_green } else { theme::DIM })
                                         .strong()
                                         .size(12.0),
-                                );
+                                ).on_hover_text(rate_tip);
 
                                 // 分割竖线
-                                ui.colored_label(c_div, "|");
+                                theme::vdiv(ui);
 
                                 // ================= 分段 2: 活跃工具 / 模型 / 纯金额 =================
                                 if self.config.view_mode == "cost" {
                                     // 纯金额模式：极简展示 RATE、TODAY、TOTAL、CACHE (自适应币种)
                                     ui.label(RichText::new("TODAY").color(c_label_grey).strong().size(11.0));
-                                    ui.label(RichText::new(self.config.format_cost(self.cached_today_usd)).color(c_yellow).strong().size(12.5));
-                                    ui.label(RichText::new(self.config.format_secondary_cost(self.cached_today_usd)).color(c_coral).size(11.5));
+                                    ui.label(RichText::new(self.config.format_cost(self.cached_today_usd)).color(c_today).strong().size(12.5))
+                                        .on_hover_text(&today_tip);
+                                    ui.label(RichText::new(self.config.format_secondary_cost(self.cached_today_usd)).color(theme::MUTED).size(11.5));
 
-                                    ui.colored_label(c_div, "|");
+                                    theme::vdiv(ui);
 
                                     ui.label(RichText::new("TOTAL").color(c_label_grey).strong().size(11.0));
                                     ui.label(RichText::new(self.config.format_cost(self.cached_total_usd)).color(c_yellow).strong().size(12.5));
-                                    ui.label(RichText::new(self.config.format_secondary_cost(self.cached_total_usd)).color(c_coral).size(11.5));
+                                    ui.label(RichText::new(self.config.format_secondary_cost(self.cached_total_usd)).color(theme::MUTED).size(11.5));
 
-                                    ui.colored_label(c_div, "|");
+                                    theme::vdiv(ui);
                                 } else {
                             if self.config.view_mode == "tool" {
                                 // 按工具展示：平铺扩充展示所有已勾选的 AI 工具
                                 if self.cached_tools.is_empty() {
                                     ui.label(RichText::new("TOOL").color(c_label_grey).strong().size(11.0));
                                     ui.label(RichText::new("未选择工具").color(c_coral).size(11.0));
-                                    ui.colored_label(c_div, "|");
+                                    theme::vdiv(ui);
                                 } else {
                                     for t in &self.cached_tools {
-                                        let short_name = match t.id.as_str() {
-                                            "claude" => "Claude",
-                                            "agy" => "Antigravity",
-                                            "cursor" => "Cursor",
-                                            "codex" => "Codex",
-                                            "copilot" => "Copilot",
-                                            "aider" => "Aider",
-                                            "cline" => "Cline",
-                                            "continue" => "Continue",
-                                            "opencode" => "OpenCode",
-                                            _ => &t.name,
-                                        };
-
-                                        let tool_color = match t.id.as_str() {
-                                            "claude" => Color32::from_rgb(251, 146, 60),  // 琥珀橙
-                                            "agy" => Color32::from_rgb(56, 189, 248),     // 科技天蓝
-                                            "cursor" => Color32::from_rgb(192, 132, 252), // 紫罗兰
-                                            "codex" => Color32::from_rgb(16, 185, 129),   // OpenAI 翡翠绿
-                                            "copilot" => Color32::from_rgb(99, 102, 241),  // GitHub 靛青蓝
-                                            "aider" => Color32::from_rgb(244, 63, 94),    // 玫瑰红
-                                            "cline" => Color32::from_rgb(6, 182, 212),    // 青色
-                                            "continue" => Color32::from_rgb(139, 92, 246), // 亮紫
-                                            "opencode" => Color32::from_rgb(236, 72, 153), // 桃粉
-                                            _ => c_coral,
-                                        };
+                                        let short_name = theme::tool_short_name(&t.id, &t.name);
+                                        let tool_color = theme::tool_color(&t.id);
 
                                         let lbl = ui.label(RichText::new(short_name).color(tool_color).strong().size(11.0));
                                         if !t.models.is_empty() {
@@ -913,7 +1119,7 @@ impl eframe::App for TokenHudApp {
                                         ui.label(RichText::new(self.config.format_cost(t.total_cost_usd)).color(c_yellow).size(11.0));
 
                                         // 每一个工具项后跟随分割竖线
-                                        ui.colored_label(c_div, "|");
+                                        theme::vdiv(ui);
                                     }
                                 }
                             } else {
@@ -921,30 +1127,10 @@ impl eframe::App for TokenHudApp {
                                 if self.cached_models.is_empty() {
                                     ui.label(RichText::new("MODEL").color(c_label_grey).strong().size(11.0));
                                     ui.label(RichText::new("暂无模型记录").color(c_cyan).size(11.0));
-                                    ui.colored_label(c_div, "|");
+                                    theme::vdiv(ui);
                                 } else {
                                     for m in self.cached_models.iter().take(4) {
-                                        let model_color = if m.short_name.starts_with("Opus")
-                                            || m.short_name.starts_with("Sonnet")
-                                            || m.short_name.starts_with("Haiku")
-                                            || m.short_name.starts_with("Fable")
-                                        {
-                                            Color32::from_rgb(251, 146, 60) // 琥珀橙 (Claude 系)
-                                        } else if m.short_name.starts_with("Gemini") {
-                                            Color32::from_rgb(56, 189, 248) // 科技天蓝 (Gemini 系)
-                                        } else if m.short_name.starts_with("GPT")
-                                            || m.short_name.starts_with("o1")
-                                            || m.short_name.starts_with("o3")
-                                            || m.short_name.starts_with("Codex")
-                                        {
-                                            Color32::from_rgb(16, 185, 129) // 翡翠绿 (OpenAI 系)
-                                        } else if m.short_name.starts_with("DeepSeek") {
-                                            Color32::from_rgb(59, 130, 246) // 亮蓝
-                                        } else if m.short_name.starts_with("Qwen") {
-                                            Color32::from_rgb(168, 85, 247) // 紫色
-                                        } else {
-                                            Color32::from_rgb(192, 132, 252) // 紫罗兰
-                                        };
+                                        let model_color = theme::model_color(&m.short_name);
 
                                         let m_lbl = ui.label(RichText::new(&m.short_name).color(model_color).strong().size(11.0));
                                         let mut tip = format!("🧠 模型: {}\n", m.model);
@@ -962,7 +1148,7 @@ impl eframe::App for TokenHudApp {
                                         ui.label(RichText::new(StatsEngine::format_compact(m.total_tokens)).color(c_white).size(11.0));
                                         ui.label(RichText::new(self.config.format_cost(m.total_cost_usd)).color(c_yellow).size(11.0));
 
-                                        ui.colored_label(c_div, "|");
+                                        theme::vdiv(ui);
                                     }
                                 }
                             }
@@ -970,17 +1156,29 @@ impl eframe::App for TokenHudApp {
                             // ================= 分段 3: 今日消耗 (工具/模型模式下展示 Token 与金额) =================
                             ui.label(RichText::new("TODAY").color(c_label_grey).strong().size(11.0));
                             ui.label(RichText::new(StatsEngine::format_compact(self.cached_today_tokens)).color(c_white).size(11.0));
-                            ui.label(RichText::new(self.config.format_cost(self.cached_today_usd)).color(c_yellow).strong().size(12.0));
-                            ui.label(RichText::new(self.config.format_secondary_cost(self.cached_today_usd)).color(c_coral).size(11.0));
+                            ui.label(RichText::new(self.config.format_cost(self.cached_today_usd)).color(c_today).strong().size(12.0))
+                                .on_hover_text(&today_tip);
+                            ui.label(RichText::new(self.config.format_secondary_cost(self.cached_today_usd)).color(theme::MUTED).size(11.0));
 
-                            ui.colored_label(c_div, "|");
+                            theme::vdiv(ui);
                         }
 
                         // ================= 分段 4: 缓存命中率 (类似 GPU 78%) =================
                         ui.label(RichText::new("CACHE").color(c_label_grey).strong().size(11.0));
-                        ui.label(RichText::new(format!("{:.1}%", self.cached_cache_rate)).color(c_green).size(11.0))
-                            .on_hover_text(format!("Prompt 缓存命中率: {:.2}%\n节省大量输入 Token 消耗与计费", self.cached_cache_rate));
+                        match self.cached_cache_rate {
+                            Some(rate) => {
+                                // 命中率偏低时提示：低于 50% 橙色，低于 20% 红色
+                                let color = if rate >= 50.0 { c_green } else if rate >= 20.0 { theme::ORANGE } else { c_coral };
+                                ui.label(RichText::new(format!("{:.1}%", rate)).color(color).size(11.0))
+                                    .on_hover_text(format!("今日 Prompt 缓存命中率: {:.2}%\n命中部分按缓存读取单价计费，显著低于普通输入单价", rate));
+                            }
+                            None => {
+                                ui.label(RichText::new("--").color(theme::DIM).size(11.0))
+                                    .on_hover_text("今日尚无请求，暂无缓存命中率");
+                            }
+                        }
                     });
+                    self.measured_content_width = content.response.rect.width();
                 });
             });
         });
@@ -1099,29 +1297,10 @@ impl eframe::App for TokenHudApp {
                                     sum_last_month += m.last_month_cost;
                                     sum_total += m.total_cost;
 
-                                    let model_color = if m.short_name.starts_with("Opus")
-                                        || m.short_name.starts_with("Sonnet")
-                                        || m.short_name.starts_with("Haiku")
-                                        || m.short_name.starts_with("Fable")
-                                    {
-                                        Color32::from_rgb(251, 146, 60)
-                                    } else if m.short_name.starts_with("Gemini") {
-                                        Color32::from_rgb(56, 189, 248)
-                                    } else if m.short_name.starts_with("GPT")
-                                        || m.short_name.starts_with("o1")
-                                        || m.short_name.starts_with("o3")
-                                        || m.short_name.starts_with("Codex")
-                                    {
-                                        Color32::from_rgb(16, 185, 129)
-                                    } else if m.short_name.starts_with("DeepSeek") {
-                                        Color32::from_rgb(59, 130, 246)
-                                    } else if m.short_name.starts_with("Qwen") {
-                                        Color32::from_rgb(168, 85, 247)
-                                    } else {
-                                        Color32::from_rgb(192, 132, 252)
-                                    };
+                                    let model_color = theme::model_color(&m.short_name);
 
-                                    ui.horizontal(|ui| {
+                                    let row_bg = ui.painter().add(egui::Shape::Noop);
+                                    let row = ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(col_gap, 0.0);
                                         // 1. 模型名称 (靠左)
                                         let tip = format!("🧠 模型: {}\n全称: {}\n原始: {}", m.short_name, m.display_name, m.raw_model);
@@ -1157,6 +1336,9 @@ impl eframe::App for TokenHudApp {
                                         let tip = format!("全部累计消耗: {} {}", self.config.format_cost(m.total_cost), self.config.format_secondary_cost(m.total_cost));
                                         render_cell(ui, col_w_total, RichText::new(text).color(color).strong().size(11.0), true, Some(tip));
                                     });
+                                    if ui.rect_contains_pointer(row.response.rect) {
+                                        ui.painter().set(row_bg, egui::Shape::rect_filled(row.response.rect.expand2(egui::vec2(4.0, 1.0)), Rounding::same(3.0), theme::ROW_HOVER));
+                                    }
                                 }
                             }
                         });
@@ -1191,7 +1373,7 @@ impl eframe::App for TokenHudApp {
         // 🖱️ 悬浮窗右键快捷菜单 (收缩到右下角托盘、设置、退出)
         // =========================================================================
         if self.show_context_menu {
-            let menu_w = 150.0;
+            let menu_w = 190.0;
             let target_pos = if let Some(pos) = self.context_menu_pos {
                 let x = pos.x.min(self.current_bar_width - menu_w - 4.0).max(4.0);
                 let y = (pos.y + 2.0).max(36.0);
@@ -1212,6 +1394,25 @@ impl eframe::App for TokenHudApp {
                         .show(ui, |ui| {
                             ui.set_min_width(menu_w - 20.0);
                             ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+
+                            // 快捷切换：展示模式与结算币种，无需打开设置窗口
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0;
+                                for (mode, label) in [("tool", "工具"), ("model", "模型"), ("cost", "金额")] {
+                                    if ui.selectable_label(self.config.view_mode == mode, RichText::new(label).size(11.5)).clicked() {
+                                        self.set_view_mode(mode);
+                                    }
+                                }
+                                ui.add_space(4.0);
+                                theme::vdiv(ui);
+                                ui.add_space(4.0);
+                                for (cur, label) in [("USD", "$"), ("CNY", "¥")] {
+                                    if ui.selectable_label(self.config.currency == cur, RichText::new(label).size(11.5)).clicked() {
+                                        self.set_currency(cur);
+                                    }
+                                }
+                            });
+                            ui.separator();
 
                             if ui.button(RichText::new("📅  记录详情查看器 (日历)").size(11.5).color(Color32::from_rgb(56, 189, 248))).clicked() {
                                 self.show_settings_window = true;
@@ -1293,7 +1494,7 @@ impl eframe::App for TokenHudApp {
                                 }
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button(RichText::new("✕ 关闭").color(Color32::from_rgb(248, 113, 113)).strong().size(11.0)).clicked() {
+                                if ui.button(RichText::new("关闭").color(Color32::from_rgb(248, 113, 113)).strong().size(11.0)).clicked() {
                                     close_this_window = true;
                                 }
                             });
@@ -1339,47 +1540,7 @@ impl eframe::App for TokenHudApp {
 
                                     // 选项卡 1: 📊 完整下钻明细
                                     1 => {
-                                        ui.label(RichText::new("各工具/模型的完整调用历史与下钻树状分析:").strong());
-                                        ui.add_space(6.0);
-
-                                        if self.config.view_mode == "model" {
-                                            for m in &self.cached_models {
-                                                let header = format!("{} · {} ({} {})", m.display_name, StatsEngine::format_compact(m.total_tokens), self.config.format_cost(m.total_cost_usd), self.config.format_secondary_cost(m.total_cost_usd));
-                                                egui::CollapsingHeader::new(RichText::new(header).strong())
-                                                    .id_salt(format!("model_full_{}", m.model))
-                                                    .default_open(true)
-                                                    .show(ui, |ui| {
-                                                        for t in &m.tools {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(format!("  • 来自 {}", t.name));
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    ui.label(format!("({}%)", t.percentage));
-                                                                    ui.label(RichText::new(StatsEngine::format_compact(t.tokens)).color(Color32::from_rgb(192, 132, 252)));
-                                                                });
-                                                            });
-                                                        }
-                                                    });
-                                            }
-                                        } else {
-                                            // "tool" 或 "cost" 模式均按工具树展示
-                                            for t in &self.cached_tools {
-                                                let header = format!("{} · {} ({} {})", t.name, StatsEngine::format_compact(t.total_tokens), self.config.format_cost(t.total_cost_usd), self.config.format_secondary_cost(t.total_cost_usd));
-                                                egui::CollapsingHeader::new(RichText::new(header).strong())
-                                                    .id_salt(format!("tool_full_{}", t.id))
-                                                    .default_open(true)
-                                                    .show(ui, |ui| {
-                                                        for m in &t.models {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(format!("  • {}", m.model));
-                                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    ui.label(RichText::new(format!("{} {}", self.config.format_cost(m.cost), self.config.format_secondary_cost(m.cost))).color(Color32::from_rgb(250, 204, 21)));
-                                                                    ui.label(RichText::new(StatsEngine::format_compact(m.tokens)).color(Color32::from_rgb(56, 189, 248)));
-                                                                });
-                                                            });
-                                                        }
-                                                    });
-                                            }
-                                        }
+                                        self.render_drilldown(ui);
                                     }
 
                                     // 选项卡 3: 🎨 展现与偏好
@@ -1387,47 +1548,65 @@ impl eframe::App for TokenHudApp {
                                         ui.label(RichText::new("HUD 横条展现设置:").strong());
                                         ui.add_space(6.0);
 
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label("当前展示模式:");
-                                                let is_tool = self.config.view_mode == "tool";
-                                                let is_model = self.config.view_mode == "model";
-                                                let is_cost = self.config.view_mode == "cost";
-                                                if ui.selectable_label(is_tool, "🛠️ 按工具 (By Tool)").clicked() {
-                                                    self.config.view_mode = "tool".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
-                                                }
-                                                if ui.selectable_label(is_model, "🧠 按模型 (By Model)").clicked() {
-                                                    self.config.view_mode = "model".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
-                                                }
-                                                if ui.selectable_label(is_cost, "💰 仅金额 (By Cost)").clicked() {
-                                                    self.config.view_mode = "cost".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
+                                                for (mode, label) in [("tool", "🛠️ 按工具 (By Tool)"), ("model", "🧠 按模型 (By Model)"), ("cost", "💰 仅金额 (By Cost)")] {
+                                                    if ui.selectable_label(self.config.view_mode == mode, label).clicked() {
+                                                        self.set_view_mode(mode);
+                                                    }
                                                 }
                                             });
+                                            ui.label(RichText::new("也可以直接右键 HUD 横条快速切换展示模式与币种").size(10.5).color(theme::MUTED));
                                         });
 
                                         ui.add_space(6.0);
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("🎯 每日预算:").strong());
+                                                let mut budget = self.config.daily_budget_usd;
+                                                if ui.add(egui::DragValue::new(&mut budget).speed(0.5).range(0.0..=100000.0).prefix("$ ").max_decimals(2)).changed() {
+                                                    self.config.daily_budget_usd = budget;
+                                                    self.config.save();
+                                                }
+                                                match self.config.budget_ratio(self.cached_today_usd) {
+                                                    Some(r) => {
+                                                        ui.add(egui::ProgressBar::new((r as f32).clamp(0.0, 1.0)).desired_width(140.0).desired_height(8.0).fill(theme::budget_color(r)));
+                                                        ui.label(RichText::new(format!("今日已用 {} ({:.0}%)", self.config.format_cost(self.cached_today_usd), r * 100.0)).color(theme::budget_color(r)));
+                                                    }
+                                                    None => {
+                                                        ui.label(RichText::new("未启用 (填 0 关闭)").color(theme::DIM));
+                                                    }
+                                                }
+                                            });
+                                            ui.label(RichText::new("启用后 HUD 横条底部显示今日进度线，TODAY 金额在达到 80% 时变橙、超支时变红").size(10.5).color(theme::MUTED));
+                                        });
+
+                                        ui.add_space(6.0);
+                                        theme::card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            if ui.checkbox(&mut self.config.always_on_top, RichText::new("📌 HUD 横条始终置顶").strong()).changed() {
+                                                self.config.save();
+                                                let level = if self.config.always_on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+                                                ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::WindowLevel(level));
+                                            }
+                                            ui.label(RichText::new("关闭后横条会被其他窗口遮挡；位置会自动记忆，找不到横条时可在托盘菜单选择「复位到屏幕顶部居中」").size(10.5).color(theme::MUTED));
+                                        });
+
+                                        ui.add_space(6.0);
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("金额结算币种:").strong());
                                                 let is_usd = !self.config.is_cny();
                                                 let is_cny = self.config.is_cny();
                                                 if ui.selectable_label(is_usd, "💵 美元 (USD / $)").clicked() {
-                                                    self.config.currency = "USD".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
+                                                    self.set_currency("USD");
                                                 }
                                                 if ui.selectable_label(is_cny, "💴 人民币 (CNY / ¥)").clicked() {
-                                                    self.config.currency = "CNY".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
+                                                    self.set_currency("CNY");
                                                 }
                                             });
                                             ui.label(RichText::new(format!(
@@ -1437,7 +1616,7 @@ impl eframe::App for TokenHudApp {
                                         });
 
                                         ui.add_space(6.0);
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label("HUD 背景透明度:");
@@ -1448,7 +1627,7 @@ impl eframe::App for TokenHudApp {
                                         });
 
                                         ui.add_space(6.0);
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("📁 本地历史归档数据 (T-1 存储):").strong());
@@ -1470,7 +1649,7 @@ impl eframe::App for TokenHudApp {
                                     // 选项卡 2: 💰 计价与汇率设置 (汇率配置 + 全网 50+ 模型官方/自定义单价)
                                     2 => {
                                         // 1. 汇率与结算币种配置卡片 (支持自定义汇率与公网接口一键同步)
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.horizontal(|ui| {
                                                 ui.label(RichText::new("💱 汇率与结算币种配置:").strong().size(12.5).color(Color32::from_rgb(56, 189, 248)));
@@ -1487,14 +1666,10 @@ impl eframe::App for TokenHudApp {
                                                 let is_usd = !self.config.is_cny();
                                                 let is_cny = self.config.is_cny();
                                                 if ui.selectable_label(is_usd, "💵 美元 (USD / $)").clicked() {
-                                                    self.config.currency = "USD".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
+                                                    self.set_currency("USD");
                                                 }
                                                 if ui.selectable_label(is_cny, "💴 人民币 (CNY / ¥)").clicked() {
-                                                    self.config.currency = "CNY".to_string();
-                                                    self.config.save();
-                                                    self.refresh_stats();
+                                                    self.set_currency("CNY");
                                                 }
 
                                                 ui.add_space(16.0);
@@ -1620,7 +1795,7 @@ impl eframe::App for TokenHudApp {
                                             let p = self.config.custom_pricing.get(id).cloned().unwrap_or(default_p);
                                             let is_editing = self.editing_model_id.as_deref() == Some(id);
 
-                                            ui.group(|ui| {
+                                            theme::card().show(ui, |ui| {
                                                 ui.set_width(ui.available_width());
 
                                                 // 顶部行：模型名称、厂商标识、价格
@@ -1731,7 +1906,7 @@ impl eframe::App for TokenHudApp {
                                     // 选项卡 4: 🛠️ 驱动与监控工具
                                     _ => {
                                         // 驱动引擎运行状态卡片 (双模智能自适应)
-                                        ui.group(|ui| {
+                                        theme::card().show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             
                                             let current_active_mode = self.config.resolved_driver_mode();
@@ -1797,7 +1972,7 @@ impl eframe::App for TokenHudApp {
                                             let status_tag = if t.detected { "✔ 已安装" } else { "✘ 未检测" };
                                             let path_str = t.detected_path.unwrap_or_else(|| "未找到目录".into());
 
-                                            ui.group(|ui| {
+                                            theme::card().show(ui, |ui| {
                                                 ui.set_width(ui.available_width());
                                                 ui.horizontal(|ui| {
                                                     if ui.checkbox(&mut is_checked, RichText::new(&t.name).strong()).changed() {
@@ -1834,6 +2009,38 @@ impl eframe::App for TokenHudApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 冒烟测试：三种展示模式下完整跑一帧 HUD + 设置窗口的每个选项卡，确保布局代码不 panic
+    #[test]
+    fn test_ui_smoke_all_modes_and_tabs() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut app = TokenHudApp::new_headless();
+        app.config.daily_budget_usd = 10.0;
+        app.show_settings_window = true;
+        app.show_context_menu = true;
+        for mode in ["tool", "model", "cost"] {
+            app.config.view_mode = mode.to_string();
+            app.cost_dropdown_open = mode == "cost";
+            for tab in 0..5 {
+                app.settings_tab = tab;
+                app.drilldown_by_model = tab % 2 == 0;
+                let _ = ctx.run(Default::default(), |ctx| app.ui(ctx));
+            }
+            assert!(app.measured_content_width > 100.0, "HUD content width should be measured in {} mode", mode);
+            assert!(app.calculate_target_width() >= app.measured_content_width + HUD_BUTTONS_WIDTH);
+        }
+    }
+
+    #[test]
+    fn test_range_table_tsv_has_header_and_total() {
+        let app = TokenHudApp::new_headless();
+        let tsv = app.range_table_tsv();
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert!(lines[0].starts_with("模型\t"));
+        assert!(lines.last().unwrap().starts_with("合计\t"));
+        assert!(lines.iter().all(|l| l.split('\t').count() == 8));
+    }
 
     #[test]
     fn test_table_column_alignment() {
