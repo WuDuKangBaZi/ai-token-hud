@@ -71,6 +71,9 @@ pub struct TokenHudApp {
     pub is_fetching_rate: bool,
     pub rate_tx: std::sync::mpsc::Sender<Result<f64, String>>,
     pub rate_rx: std::sync::mpsc::Receiver<Result<f64, String>>,
+    /// 是否已登记开机自启动 (以注册表 Run 项为准，不写入 config.json)
+    pub autostart_enabled: bool,
+    pub autostart_error: Option<String>,
 }
 
 impl TokenHudApp {
@@ -81,6 +84,9 @@ impl TokenHudApp {
             ctx_clone.request_repaint();
         }));
         app.tray = crate::tray::SystemTray::new(ctx.clone());
+
+        // 已开启开机自启动时，校正注册表中登记的 exe 路径 (程序被移动过的情况)
+        crate::autostart::refresh_path();
 
         // 命令行 `--settings [选项卡序号]`：启动后直接打开设置窗口 (便于快捷方式直达与界面核对)
         let args: Vec<String> = std::env::args().collect();
@@ -162,6 +168,8 @@ impl TokenHudApp {
             drilldown_by_model: false,
             copied_at: None,
             pending_pos: None,
+            autostart_enabled: crate::autostart::is_enabled(),
+            autostart_error: None,
         };
 
         app.refresh_stats();
@@ -855,7 +863,7 @@ impl TokenHudApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
 
-        // 颜色定义 (参考游戏加加 OSD 调色板)
+        // 颜色定义 (参考硬件 OSD 调色板)
         let c_label_grey = theme::LABEL_GREY;
         let c_green = theme::GREEN;
         let c_coral = theme::CORAL;
@@ -880,7 +888,7 @@ impl TokenHudApp {
         let is_active = idle_secs < IDLE_AFTER_SECS;
 
         // =========================================================================
-        // 🎮 主悬浮窗：游戏加加风格的极简横条 HUD (仅 34px 高) + 金额模式向下展开明细
+        // 🎮 主悬浮窗：极简横条 HUD (仅 36px 高) + 金额模式向下展开明细
         // =========================================================================
         let bar_frame = Frame::none()
             .fill(Color32::from_rgba_premultiplied(32, 35, 42, (self.config.opacity * 255.0) as u8))
@@ -1600,6 +1608,25 @@ impl TokenHudApp {
                                                 ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::WindowLevel(level));
                                             }
                                             ui.label(RichText::new("关闭后横条会被其他窗口遮挡；位置会自动记忆，找不到横条时可在托盘菜单选择「复位到屏幕顶部居中」").size(10.5).color(theme::MUTED));
+                                        });
+
+                                        ui.add_space(6.0);
+                                        theme::card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            let mut enabled = self.autostart_enabled;
+                                            if ui.checkbox(&mut enabled, RichText::new("🚀 开机自动启动").strong()).changed() {
+                                                match crate::autostart::set_enabled(enabled) {
+                                                    Ok(()) => {
+                                                        self.autostart_enabled = enabled;
+                                                        self.autostart_error = None;
+                                                    }
+                                                    Err(e) => self.autostart_error = Some(e),
+                                                }
+                                            }
+                                            ui.label(RichText::new("登录 Windows 后自动运行 HUD 横条（写入当前用户的注册表启动项，无需管理员权限）；移动 exe 后下次启动会自动更新路径").size(10.5).color(theme::MUTED));
+                                            if let Some(err) = &self.autostart_error {
+                                                ui.label(RichText::new(err).size(10.5).color(theme::CORAL));
+                                            }
                                         });
 
                                         ui.add_space(6.0);

@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Color32, Frame, Margin, Rounding, Stroke};
 
-// 统一调色板 (参考游戏加加 OSD 调色板)，HUD 横条与设置窗口共用
+// 统一调色板 (参考硬件监视器 OSD 调色板)，HUD 横条与设置窗口共用
 pub const LABEL_GREY: Color32 = Color32::from_rgb(156, 163, 175); // 标签灰色
 pub const MUTED: Color32 = Color32::from_rgb(148, 163, 184);      // 次要说明文字
 pub const DIM: Color32 = Color32::from_rgb(107, 114, 128);        // 空闲 / 零值

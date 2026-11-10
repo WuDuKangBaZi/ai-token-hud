@@ -10,6 +10,7 @@ mod native_scanner;
 mod tray;
 mod range_stats;
 mod theme;
+mod autostart;
 mod app;
 
 use eframe::egui;
@@ -18,7 +19,7 @@ use app::TokenHudApp;
 fn main() {
     let config = config::HudConfig::load();
 
-    // 游戏加加风格微型横条悬浮窗配置 (高 36px，初始宽 640px，自适应多工具扩充)
+    // 极简微型横条悬浮窗配置 (高 36px，初始宽 640px，自适应多工具扩充)
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("AI Token HUD Bar")
         .with_inner_size([640.0, 36.0])
