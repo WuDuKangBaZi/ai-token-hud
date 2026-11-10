@@ -17,7 +17,7 @@
 
 <div align="center">
 
-![HUD Bar](assets/hud-bar.png)
+![HUD Bar](https://cdn.jsdelivr.net/gh/WuDuKangBaZi/ai-token-hud@master/assets/hud-bar.png)
 
 > 上图及下文的金额均为示例数据。
 </div>
@@ -41,7 +41,7 @@
 
 <div align="center">
 
-![多周期明细面板](assets/detail-panel.jpg)
+![多周期明细面板](https://cdn.jsdelivr.net/gh/WuDuKangBaZi/ai-token-hud@master/assets/detail-panel.jpg)
 
 </div>
 ### 设置与统计窗口

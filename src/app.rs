@@ -74,6 +74,9 @@ pub struct TokenHudApp {
     /// 是否已登记开机自启动 (以注册表 Run 项为准，不写入 config.json)
     pub autostart_enabled: bool,
     pub autostart_error: Option<String>,
+    pub frame_count: usize,
+    pub last_activity: Instant,
+    pub has_trimmed_idle: bool,
 }
 
 impl TokenHudApp {
@@ -170,6 +173,9 @@ impl TokenHudApp {
             pending_pos: None,
             autostart_enabled: crate::autostart::is_enabled(),
             autostart_error: None,
+            frame_count: 0,
+            last_activity: Instant::now(),
+            has_trimmed_idle: false,
         };
 
         app.refresh_stats();
@@ -747,12 +753,42 @@ impl TokenHudApp {
     }
 }
 
+/// 在 Windows 下释放启动期和空闲期未使用的显卡驱动和字体初始化工作集内存
+#[cfg(target_os = "windows")]
+pub fn trim_working_set() {
+    unsafe {
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetProcessWorkingSetSize(
+                hProcess: isize,
+                dwMinimumWorkingSetSize: usize,
+                dwMaximumWorkingSetSize: usize,
+            ) -> i32;
+        }
+        let handle = GetCurrentProcess();
+        SetProcessWorkingSetSize(handle, usize::MAX, usize::MAX);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn trim_working_set() {}
+
 impl eframe::App for TokenHudApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0] // 允许底层分层透明
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame_count = self.frame_count.saturating_add(1);
+        if self.frame_count <= 5 {
+            ctx.request_repaint();
+        }
+        if self.frame_count == 5 {
+            // 启动完成后第 5 帧（此时字体纹理已上传 GPU，首帧已绘制）：
+            // 自动修剪启动期显卡驱动与字体加载滞留的工作集内存
+            trim_working_set();
+        }
+
         self.ui(ctx);
     }
 }
@@ -832,6 +868,15 @@ impl TokenHudApp {
                 self.cached_speed = self.collector.get_realtime_speed();
             }
             self.last_sync = Instant::now();
+        }
+
+        // 活跃状态跟踪与空闲内存自动修剪机制
+        if self.cached_speed > 0 || self.cost_dropdown_open || self.show_settings_window || self.show_context_menu {
+            self.last_activity = Instant::now();
+            self.has_trimmed_idle = false;
+        } else if !self.has_trimmed_idle && self.last_activity.elapsed().as_secs() >= 30 {
+            trim_working_set();
+            self.has_trimmed_idle = true;
         }
 
         if self.config.view_mode != "cost" {
@@ -1017,6 +1062,7 @@ impl TokenHudApp {
                                     .on_hover_text("收缩到右下角托盘 (点击右下角托盘图标可恢复)")
                                     .clicked() {
                                     crate::tray::hide_hud();
+                                    trim_working_set();
                                 }
 
                                 // 退出按钮悬浮时变红，与其余按钮区分，降低误触
@@ -1443,6 +1489,7 @@ impl TokenHudApp {
                             if ui.button(RichText::new("🗕  收缩到右下角托盘").size(11.5).color(Color32::from_rgb(209, 213, 219))).clicked() {
                                 self.show_context_menu = false;
                                 crate::tray::hide_hud();
+                                trim_working_set();
                             }
                             ui.separator();
                             if ui.button(RichText::new("🚪  关闭退出程序").size(11.5).color(Color32::from_rgb(248, 113, 113)).strong()).clicked() {
