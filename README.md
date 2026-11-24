@@ -2,16 +2,19 @@
 
 <div align="center">
 
+[![Release](https://img.shields.io/badge/Release-v0.2.0-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.0)
 ![Rust](https://img.shields.io/badge/Language-Rust-orange?style=flat-square&logo=rust)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=flat-square&logo=windows)
 ![GUI](https://img.shields.io/badge/GUI-eframe%20%2F%20egui-purple?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-**桌面悬浮的 AI Token 与费用实时监视器**
+**桌面悬浮的 AI Token 与费用实时监视器 · 多维统计工作台**
 
-一条 36px 高的置顶横条，形态类似 RivaTuner (RTSS) 的硬件 OSD。  
-实时显示 Claude Code、Codex、Antigravity 等工具的输出流速、今日费用、历史累计与缓存命中率。  
-由文件写入事件驱动刷新，空闲时 CPU 占用为 0%，内存约 15MB。
+一条 38px 高的置顶 HUD 悬浮横条，内置 **Modern Glass（极客暗色玻璃）** 与 **Cyber OSD（硬核遥测监视器）** 双视觉主题。  
+实时监控 Claude Code、Codex、Antigravity、GitHub Copilot、Gemini 等 AI 编程工具的输出流速、当天花费、周期累计与缓存命中率。  
+基于 Windows `ReadDirectoryChangesW` 文件写入事件驱动刷新，空闲时 CPU 占用 0%，内存自动修剪至 ~15–30 MB。
+
+[前往 GitHub Releases 下载 v0.2.0 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
 
 </div>
 
@@ -21,19 +24,32 @@
 
 > 上图及下文的金额均为示例数据。
 </div>
+
 ---
 
-## 功能
+## 核心功能
 
-- **HUD 横条**：显示输出流速 `RATE (T/s)`、今日费用 `TODAY`、历史累计 `TOTAL`、Prompt 缓存命中率 `CACHE%`。可按工具、按模型、仅金额三种模式展示，背景透明度 40%～100% 可调。
-- **每日预算**：设置额度后，横条底部显示进度线，`TODAY` 达到 80% 变橙，超支变红。
-- **空闲指示**：`RATE` 只统计输出 Token，并过滤耗时小于 100ms 的异常记录；超过 60 秒无新请求时指示灯置灰。
-- **多周期明细面板**：金额模式下鼠标悬停横条，展开各模型在当天、本周、当月、上月、全部五个周期的费用；移开鼠标后自动收起。
-- **记录详情查看器**：月历热力图（底色深浅对应当日金额占当月峰值的比例）、8 档预置时间范围、点击日历自选起止日期、各模型 Token 与费用明细表，支持关键词过滤，可一键复制为 TSV 粘贴进 Excel。
-- **计价**：内置 50+ 模型的官方单价（Claude、OpenAI、Gemini、DeepSeek、Qwen、Grok、Kimi 等），支持自定义输入、输出与缓存读写单价。数据源中未计价的记录会按内置单价表补算；没有公开单价的模型保持 $0。
-- **汇率**：USD / CNY 双币种显示，汇率可手动填写，也可从公开接口获取并在每次启动时自动同步。
-- **系统托盘**：不占用任务栏，可收起到托盘；位置自动记忆，拖出屏幕后可从托盘菜单复位。
-- **开机自启动**：在「展现与偏好」中勾选后，登录 Windows 时自动运行；移动 exe 后下次启动会自动更新登记的路径。
+- **双视觉主题与原生窗口特效**：
+  - 随时在 **极客暗色玻璃（Modern Glass）** 与 **硬核遥测监视器（Cyber OSD）** 间切换，采用全自绘矢量图标、Windows 分层字体栈（`Segoe UI` + `Cascadia Mono` + 微软雅黑）与千分位等宽数字。
+  - 支持 **Windows 11 原生 DWM 亚克力背景模糊与硬件圆角**，以及 **鼠标点击穿透模式（`Ctrl+Alt+T`）**，不遮挡底层 IDE 或全屏操作。
+- **HUD 实时悬浮横条（全中英文国际化）**：
+  - 中文模式下显示 **速率 (`T/s`)**、**当天**、**全部/本周/本月**、**缓存命中 (`%`)**，并在 `速率` 右侧绘制最近请求 Sparkline 实时速率波形图；支持内联可选双币种副金额。
+  - 三种展示模式：**按工具**（仅显示当天活跃使用的工具）、**按模型**（仅显示当天实际调用的模型）、**仅金额**（搭配自由开关周期统计）。
+  - 支持 `TOTAL` 统计范围切换（**本周 / 本月 / 全部**）及五方位屏幕停靠预设（**左上角 / 居中 / 右上角 / 左下角 / 右下角**）与边缘磁吸（避让任务栏）；切换模式或范围时自动校准位置，底部停靠时面板与右键菜单自动**向上**展开。
+- **三合一可固定遥测展开面板**：
+  - 金额模式下悬停自动展开（或点击图钉按钮 / `Ctrl+Alt+F` 在任意模式下固定展开），支持拖拽面板外缘抓手或设置滑块**自定义面板高度（200–720 px）**。
+  - **多周期矩阵**：横向对比各模型在今日、本周、本月、上月、累计五个周期的费用，零磁盘 I/O 增量更新。
+  - **今日分布**：展示输入 / 输出 / 缓存读取占比堆叠条、Prompt 缓存省钱总额与工具消耗排行。
+  - **实时请求流**：按时间倒序展示单次请求明细，Tokens 拆分为 **输入 / 输出 / 缓存创建 / 缓存命中** 四列，联动真实生成速率与高额消费标红提醒。
+- **预算与异常处理**：
+  - 支持 **每日预算** 与 **月度预算**（HUD 底部实时绘制进度条，≥80% 橙色预警，超支标红）及 **单次高额请求标记阈值**；过滤低于 100ms 与异常毛刺耗时，超过 60 秒无请求指示灯自动置灰。
+- **模型单价、在线目录同步与双币种汇率**：
+  - 内置 2026 主流大模型官方单价表（Claude、OpenAI/Codex、Gemini、DeepSeek、Qwen、GLM、EXAONE、Grok、MiniMax 等），支持一键同步 `models.dev` 与 OpenRouter 在线定价目录。
+  - 支持行内修改或手动新增自定义模型，变更后**纯内存回溯重算历史缓存与所有报表**；支持 USD / CNY 实时汇率同步与开机自动更新。
+- **原生与 CC Switch 双引擎驱动**：
+  - 自动探测系统环境，支持智能切换或手动强制 **CC Switch SQLite** / **原生会话日志扫描**，并记忆多日原生历史（`native_daily.json` + `native_today.json`），跨零点与重启零数据丢失。
+
+---
 
 ## 界面示意
 
@@ -44,40 +60,51 @@
 ![多周期明细面板](https://cdn.jsdelivr.net/gh/WuDuKangBaZi/ai-token-hud@master/assets/detail-panel.jpg)
 
 </div>
-### 设置与统计窗口
 
-点击横条上的 `📅` 或 `⚙` 打开，共 5 个选项卡：
+### 独立统计与设置工作台
 
-| 序号 | 选项卡 | 内容 |
+双击横条、点击 `📅` / 滑块图标或右键托盘打开，共 **6 个选项卡**（支持 `--settings <序号>` 直达）：
+
+| 序号 | 选项卡 | 核心功能 |
 | :--- | :--- | :--- |
-| 0 | 记录详情查看器 | 月历热力图、时间范围筛选、模型明细表与汇总 |
-| 1 | 完整下钻明细 | 以模型或工具为视角的树状层级统计 |
-| 2 | 计价与汇率设置 | 汇率配置、模型单价编辑 |
-| 3 | 展现与偏好 | 展示模式、结算货币、每日预算、透明度、始终置顶、开机自启动 |
-| 4 | 驱动与监控工具 | 数据源策略、已安装工具检测与显隐开关 |
+| 0 | **日历与趋势** | 月历热力图、每日柱状趋势图、8 档预设时间范围 + 日历自选起止日期、可排序自适应模型明细表、**一键复制 TSV 与 UTF-8 BOM CSV 账单导出** |
+| 1 | **消耗全景下钻透视** | **工具 / 模型双视角下钻透视**、顶部费用份额彩带、日历同款 8 档时间筛选 + 「同步日历自定义」筛选 |
+| 5 | **项目与会话消耗排行榜** | 按项目/按会话排行、关键词过滤，精确关联 Antigravity / Copilot / Codex / Claude Code 的代码仓库路径与会话标题 |
+| 2 | **模型单价与汇率** | USD/CNY 汇率在线同步、在线模型目录同步（`models.dev` / OpenRouter）、筛选/行内修改/手动新增自定义模型 |
+| 3 | **外观与悬浮窗** | Modern Glass / Cyber OSD 预览切换、展示模式、`TOTAL` 范围、停靠位置、展开面板高度、DWM 模糊、点击穿透、全局快捷键、预算、开机自启动 |
+| 4 | **数据源与工具** | 采集驱动策略（智能自适应 / 强制 CC Switch / 强制原生扫描）、内核监听路径状态、已安装工具探测与显隐开关 |
+
+---
 
 ## 数据来源
 
-统计有两种数据源，默认自动选择：检测到 CC Switch 时读取其数据库，否则扫描各工具的本地会话记录。也可以在设置中强制指定其一。
+统计支持两种驱动模式（默认自适应优先 CC Switch，未安装或强制原生时启用本地会话日志增量解析）：
 
 | 数据源 | 读取位置 | 说明 |
 | :--- | :--- | :--- |
-| [CC Switch](https://github.com/farion1231/cc-switch) | `~/.cc-switch/cc-switch.db` | 只读打开，读取 `proxy_request_logs` 与 `usage_daily_rollups`，可获得归档后的长期历史 |
-| Claude Code | `~/.claude/projects/` | 原生扫描 |
-| Google Antigravity | `~/.gemini/antigravity/brain/`、`~/.gemini/antigravity-cli/brain/` | 原生扫描 |
-| Codex | `~/.codex/sessions/` | 原生扫描 |
+| [CC Switch](https://github.com/farion1231/cc-switch) | `~/.cc-switch/cc-switch.db` | 只读 URI 打开，联合查询 `proxy_request_logs` 与 `usage_daily_rollups` |
+| Claude Code | `~/.claude/projects/<dir>/*.jsonl` 与 `subagents/*.jsonl` | 增量游标解析 + 按 `message.id` 去重 + 同目录真实工作区路径（保留连字符） |
+| Google Antigravity | `~/.gemini/antigravity/brain/`、`conversation_summaries.db`（含 `-cli`） | 增量扫描 `PLANNER_RESPONSE`，通过摘要库 + 父子链继承关联项目名与会话标题 |
+| OpenAI Codex | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` 及 `.jsonl.zst` | 增量读取与 `.zst` 解压索引、UUID 提取、`last_session_id` 游标续传 |
+| GitHub Copilot CLI | `~/.copilot/session-state/<uuid>/events.jsonl` 与 `workspace.yaml` | 增量解析 `session.usage_record`，解析仓库/目录路径与会话标题 |
 
-`~` 即 `%USERPROFILE%`。原生扫描按文件游标增量解析，不依赖任何外部软件。
+> `~` 即 `%USERPROFILE%`。原生模式会自动在 `~/.ai-token-hud/` 归档历史日数据与今日缓存。
 
-## 隐私
+---
 
-- 所有数据源均以只读方式访问，不修改任何工具的会话文件或数据库。
-- 统计结果只保存在本机，不上传。
-- 唯一的联网行为是获取汇率：通过系统自带的 `curl.exe` 请求 `open.er-api.com`（备用 `api.exchangerate-api.com`），仅在点击获取按钮或开启了启动自动同步时发生。
+## 隐私与安全
+
+- 所有工具日志与 SQLite 数据库均以**只读方式**打开，绝不写入或篡改第三方会话目录。
+- 全部使用统计与自定义配置仅保存在本机 `~/.ai-token-hud/`，不上传任何遥测数据或代码内容。
+- 仅有的两项**可选联网请求**（均可在设置中关闭）：
+  1. 汇率获取：通过系统自带 `curl.exe` 访问 `open.er-api.com` / `api.exchangerate-api.com`。
+  2. 在线模型定价同步：访问 `models.dev` / `openrouter.ai` 获取公开模型目录单价。
+
+---
 
 ## 编译与运行
 
-需要 Windows 10 / 11 (x64) 与 Rust 1.85+（MSVC 工具链）。
+环境要求：Windows 10 / 11 (x64) + Rust 1.85+（MSVC 工具链，Edition 2024）。
 
 ```bash
 git clone https://github.com/WuDuKangBaZi/ai-token-hud.git
@@ -86,61 +113,82 @@ cargo test
 cargo build --release
 ```
 
-编译产物为 `target/release/ai-token-hud.exe`，双击即可运行，不会弹出控制台窗口。
+编译产物位于 `target/release/ai-token-hud.exe`，双击直接运行（无控制台黑框）。
 
-加上 `--settings <序号>` 可在启动后直接打开对应选项卡（序号见上表）：
+支持命令行直接打开指定工作台页签（序号见上表）：
 
 ```bash
 target/release/ai-token-hud.exe --settings 0
 ```
 
-### 配置文件
+### 本地配置文件与缓存
 
 | 文件 | 位置 | 内容 |
 | :--- | :--- | :--- |
-| `config.json` | `~/.ai-token-hud/` | 设置、汇率、自定义单价、驱动模式 |
-| `history_cache.json` | `~/.ai-token-hud/` | 历史统计缓存 |
-| `native_cursors.json` | `~/.ai-token-hud/` | 原生扫描的文件游标 |
+| `config.json` | `~/.ai-token-hud/` | 主题、停靠位置、面板高度、`TOTAL` 范围、汇率、自定义单价、驱动与工具开关 |
+| `history_cache.json` | `~/.ai-token-hud/` | T-1 历史统计加速缓存 |
+| `native_cursors.json` | `~/.ai-token-hud/` | 原生扫描字节偏移、模型与会话增量游标 |
+| `native_daily.json` | `~/.ai-token-hud/` | 原生扫描多日聚合归档（含按天与按会话粒度，支持跨日与重算） |
+| `native_today.json` | `~/.ai-token-hud/` | 原生扫描今日记录快照（重启/切驱动恢复零丢失） |
+| `pricing_catalog.json` | `~/.ai-token-hud/` | 本地缓存的在线模型定价目录 |
 
-删除这三个文件即可恢复初始状态。
+删除以上文件即可恢复出厂初始状态。开启「开机自动启动」仅写入当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AiTokenHud`，卸载前在设置关闭该开关即可清理。
 
-开启「开机自动启动」时，程序会在注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下写入名为 `AiTokenHud` 的值，这是程序唯一写入注册表的地方。卸载前请先在设置中关闭该选项，再删除 exe。
+---
 
-## 操作速查
+## 操作与快捷键速查
 
-| 操作 | 效果 |
+| 操作 / 快捷键 | 效果 |
 | :--- | :--- |
-| 左键拖拽横条 | 移动位置，停下后自动记忆 |
-| 双击横条 / 点击 `⚙` | 打开或关闭设置与统计窗口 |
-| 点击 `📅` | 打开记录详情查看器 |
-| 点击 `🗕` | 收起到系统托盘 |
-| 鼠标悬停横条 | 金额模式下展开多周期明细面板 |
-| 右键横条 | 快捷菜单：切换展示模式与币种、打开日历或设置、收起、退出 |
-| 右键托盘图标 | 显示或隐藏横条、复位到屏幕顶部居中、退出 |
-| 日历中依次点击两个日期 | 自选统计范围 |
+| `Ctrl+Alt+H` | 全局显示 / 隐藏 HUD 悬浮条 |
+| `Ctrl+Alt+T` | 全局开启 / 关闭鼠标点击穿透模式 |
+| `Ctrl+Alt+F` | 全局展开 / 固定遥测面板 |
+| 左键拖拽横条 / 抓手 | 自由移动停靠位置，静止后自动磁吸与记忆 |
+| 双击横条 / 点击设置图标 | 打开或关闭统计与设置工作台 |
+| 拖拽展开面板上/下外缘把手 | 实时调整展开面板高度（`200–720 px`） |
+| 右键横条 | 快捷菜单：模式、币种、语言、主题、累计范围（周/月/全）、五方位停靠、穿透、工作台、退出 |
+| 右键系统托盘图标 | 显隐横条、取消穿透、切换主题、复位位置、打开设置、退出 |
+| 日历中依次点击两个日期 | 自选日历与趋势统计区间 |
+
+---
 
 ## 代码结构
 
 ```text
 src/
-├── main.rs           # 入口、无边框透明窗口初始化、CJK 字体加载
-├── app.rs            # 界面：HUD 横条、明细面板、日历与表格、设置窗口
-├── autostart.rs      # 开机自启动（当前用户的注册表 Run 项）
-├── collector.rs      # 采集调度（CC Switch / 原生扫描）与输出速率计算
-├── config.rs         # 配置持久化、模型单价表、统一计价、汇率获取
-├── detector.rs       # 检测本机已安装的 AI 工具
-├── history_cache.rs  # 历史统计缓存与 CC Switch 归档数据聚合
-├── native_scanner.rs # Claude Code / Antigravity / Codex 会话的增量解析
-├── range_stats.rs    # 时间范围计算、日历排布、热力比例、TSV 格式化
-├── stats.rs          # 按工具、按模型的聚合与多周期费用统计
-├── theme.rs          # 调色板、深色主题、品牌与模型配色
-├── tray.rs           # 系统托盘图标与菜单、窗口位置复位
-└── watcher.rs        # 基于 ReadDirectoryChangesW 的文件写入监听
+├── main.rs            # 单实例互斥、无边框透明窗口初始化、按停靠预设定位、分层字体加载
+├── app.rs             # 应用主状态、事件唤醒循环、窗口尺寸与位置自适应、单测冒烟套件
+├── collector.rs       # 采集调度（CC Switch / 原生模式）与严格按时间序的实时速率追踪
+├── config.rs          # 配置持久化、模型单价表与别名解析、有效成本与缓存节省计算、汇率同步
+├── pricing_catalog.rs # models.dev / OpenRouter 在线定价目录异步拉取、合并与本地缓存
+├── detector.rs        # 本机已安装 AI 编程工具探测
+├── history_cache.rs   # T-1 历史累计加速缓存与单价变更内存重算
+├── native_scanner.rs  # Claude(+subagents) / Antigravity / Codex(.zst) / Copilot 增量解析与归档
+├── project_stats.rs   # 跨工具项目路径、Antigravity 摘要 DB 与会话标题索引、项目排行榜引擎
+├── range_stats.rs     # 日历热力、多周期区间摘要与消耗全景下钻（RangeBreakdown）引擎、CSV/TSV 导出
+├── stats.rs           # 今日按工具/按模型切片、PeriodBaseCache 多周期模型矩阵聚合
+├── theme.rs           # Modern Glass & Cyber OSD 视觉令牌与高光/准星表面装饰
+├── i18n.rs            # 简体中文 / English 国际化字典与时间相对格式
+├── tray.rs            # Windows 系统托盘菜单、动态悬停汇总与主界面通信标记
+├── hotkeys.rs         # 全局热键后台监听（RegisterHotKey）
+├── watcher.rs         # 基于 ReadDirectoryChangesW 的多目录原生文件事件监听
+├── win_fx.rs          # Win32 DWM 亚克力模糊、点击穿透、多屏工作区几何与边缘磁吸
+├── autostart.rs       # 当前用户开机自启动注册表管理与路径自愈
+└── ui/
+    ├── mod.rs          # 通用表格单元格、胶囊标签、切换开关、Sparkline 波形绘图组件
+    ├── hud_bar.rs      # 紧凑/多模式 HUD 横条排版与预算进度条渲染
+    ├── flyout.rs       # 可固定/可调高三合一遥测弹出面板（多周期矩阵 / 今日分布 / 实时请求流）
+    ├── context_menu.rs # HUD 右键上下文快捷菜单
+    ├── analytics.rs    # 工作台：日历与趋势页、消耗全景下钻页、项目与会话排行页
+    ├── pricing_page.rs # 工作台：汇率与模型定价目录行内编辑/新增页
+    └── studio.rs       # 工作台框架、侧边栏导航、外观与驱动设置页
 ```
+
+---
 
 ## 致谢
 
-感谢开源项目 [CC Switch](https://github.com/farion1231/cc-switch)。本项目读取其本地数据库中的请求日志与每日归档表，借此获得跨工具的统一统计与完整的长期历史。
+感谢开源项目 [CC Switch](https://github.com/farion1231/cc-switch)。本项目支持直接只读读取其数据库中的请求日志与每日归档表，并在此基础上补充了全量原生扫描与双视图工作台。
 
 ## 许可证
 
