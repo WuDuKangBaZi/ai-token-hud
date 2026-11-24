@@ -15,6 +15,7 @@ mod theme;
 mod autostart;
 mod win_fx;
 mod hotkeys;
+mod http_client;
 mod project_stats;
 mod ui;
 mod app;

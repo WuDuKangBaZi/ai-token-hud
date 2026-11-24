@@ -371,6 +371,25 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
 
         if render_switch_line(
             ui,
+            lang.tr("悬停 HUD 自动展开遥测面板", "Auto-Expand Flyout on Hover"),
+            lang.tr("默认关闭以防鼠标路过误触展开；开启后在「仅金额」模式下悬停 260ms 自动弹出，关闭时可点击展开按钮或按 Ctrl+Alt+F 打开", "Off by default to prevent accidental popups on hover; when enabled, hovering 260ms in Cost mode opens the flyout (or click Expand / Ctrl+Alt+F)"),
+            &mut app.config.hover_expand_flyout,
+            t,
+        ) {
+            if !app.config.hover_expand_flyout {
+                app.hover_enter_time = None;
+                if !app.flyout_pinned {
+                    app.cost_dropdown_open = false;
+                }
+            }
+            app.config.save();
+            root_ctx.request_repaint_of(ViewportId::ROOT);
+        }
+
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
+
+        if render_switch_line(
+            ui,
             lang.tr("实时速率迷你波形图 (Sparkline)", "Live Throughput Sparkline"),
             lang.tr("在「速率」右侧绘制最近请求的输出速率趋势波形", "Render mini throughput curve/bars beside RATE"),
             &mut app.config.show_sparkline,

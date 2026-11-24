@@ -7,7 +7,6 @@ use crate::app::TokenHudApp;
 use crate::collector::TokenCollector;
 use crate::stats::StatsEngine;
 use crate::theme::{self, ThemeTokens};
-use crate::ui::hud_bar::HUD_BAR_HEIGHT;
 use crate::ui::icons::{self, Icon};
 use crate::ui::{pill_badge, pill_tab, render_cell};
 
@@ -16,16 +15,16 @@ pub fn render_flyout(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Conte
     let screen = ctx.screen_rect();
     let is_bottom = app.is_bottom_dock();
 
-    let (bar_rect, flyout_rect) = if is_bottom {
-        let bar_top = (screen.max.y - HUD_BAR_HEIGHT).max(screen.min.y);
-        (
-            Rect::from_min_max(Pos2::new(screen.min.x, bar_top), screen.max),
-            Rect::from_min_max(screen.min, Pos2::new(screen.max.x, (bar_top - 4.0).max(screen.min.y + 80.0))),
+    let bar_rect = app.hud_bar_rect(screen);
+    let flyout_rect = if is_bottom {
+        Rect::from_min_max(
+            screen.min,
+            Pos2::new(screen.max.x, (bar_rect.min.y - 4.0).max(screen.min.y + 80.0)),
         )
     } else {
-        (
-            Rect::from_min_max(screen.min, Pos2::new(screen.max.x, screen.min.y + HUD_BAR_HEIGHT)),
-            Rect::from_min_max(Pos2::new(screen.min.x, screen.min.y + HUD_BAR_HEIGHT + 4.0), screen.max),
+        Rect::from_min_max(
+            Pos2::new(screen.min.x, (bar_rect.max.y + 4.0).min(screen.max.y)),
+            screen.max,
         )
     };
 

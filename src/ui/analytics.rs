@@ -549,12 +549,20 @@ pub fn render_analytics_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &Theme
                         render_cell(ui, w_cache, 21.0, RichText::new(StatsEngine::format_compact(m.cache_read_tokens)).font(theme::mono(11.0)).color(t.text_muted), true, None);
                         render_cell(ui, w_tok, 21.0, RichText::new(StatsEngine::format_compact(m.total_tokens)).font(theme::mono(11.2)).strong().color(t.text_primary), true, None);
 
-                        let (cost_str, cost_col, cost_tip) = if m.is_unpriced {
+                        let (cost_str, cost_col, cost_tip) = if m.is_unpriced && m.total_cost_usd <= 0.0 {
                             (
                                 lang.tr("未计价", "Unpriced").to_string(),
                                 t.warning,
                                 lang.tr("单价表暂未收录此模型，可在「模型单价与汇率」手动新增", "Unknown pricing; add custom rate in Pricing").to_string(),
                             )
+                        } else if m.is_unpriced {
+                            let s = app.config.format_cost(m.total_cost_usd);
+                            let sec = app.config.format_secondary_cost(m.total_cost_usd);
+                            let note = lang.tr(
+                                "含部分未收录单价的子变体，可在「模型单价与汇率」手动新增",
+                                "Includes partially unpriced variants; add custom rate in Pricing",
+                            );
+                            (format!("{}*", s), t.warning, format!("{} {}\n{}", s, sec, note))
                         } else {
                             let s = app.config.format_cost(m.total_cost_usd);
                             let tip = format!("{} {}", s, app.config.format_secondary_cost(m.total_cost_usd));

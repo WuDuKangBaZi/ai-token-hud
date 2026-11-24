@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v0.2.1-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.1)
+[![Release](https://img.shields.io/badge/Release-v0.2.2-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.2)
 ![Rust](https://img.shields.io/badge/Language-Rust-orange?style=flat-square&logo=rust)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=flat-square&logo=windows)
 ![GUI](https://img.shields.io/badge/GUI-eframe%20%2F%20egui-purple?style=flat-square)
@@ -14,7 +14,7 @@
 实时监控 Claude Code、Codex、Antigravity、GitHub Copilot、Gemini 等 AI 编程工具的输出流速、当天花费、周期累计与缓存命中率。  
 基于 Windows `ReadDirectoryChangesW` 文件写入事件驱动刷新，空闲时零轮询、0% CPU 占用与极低磁盘 I/O，内存自动修剪至 ~15–30 MB。
 
-[前往 GitHub Releases 下载 v0.2.1 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
+[前往 GitHub Releases 下载 v0.2.2 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
 
 </div>
 
@@ -37,7 +37,7 @@
   - 三种展示模式：**按工具**（仅显示当天活跃使用的工具）、**按模型**（仅显示当天实际调用的模型）、**仅金额**（搭配自由开关周期统计）。
   - 支持 `TOTAL` 统计范围切换（**本周 / 本月 / 全部**）及五方位屏幕停靠预设（**左上角 / 居中 / 右上角 / 左下角 / 右下角**）与边缘磁吸（避让任务栏）；切换模式或范围时自动校准位置，底部停靠时面板与右键菜单自动**向上**展开。
 - **三合一可固定遥测展开面板**：
-  - 金额模式下悬停自动展开（或点击图钉按钮 / `Ctrl+Alt+F` 在任意模式下固定展开），支持拖拽面板外缘抓手或设置滑块**自定义面板高度（200–720 px）**。
+  - 默认通过点击右侧展开 / 固定按钮或全局快捷键 `Ctrl+Alt+F` 展开面板（亦可在设置中开启「悬停 HUD 自动展开」），支持拖拽外缘抓手或设置滑块**自定义面板高度（200–720 px）**；展开后横条自动拉伸至与面板同宽，核心指标对称居中并均匀分布分隔线留白。
   - **多周期矩阵**：横向对比各模型在今日、本周、本月、上月、累计五个周期的费用，零磁盘 I/O 增量更新。
   - **今日分布**：展示输入 / 输出 / 缓存读取占比堆叠条、Prompt 缓存省钱总额与工具消耗排行。
   - **实时请求流**：按时间倒序展示单次请求明细，Tokens 拆分为 **输入 / 输出 / 缓存创建 / 缓存命中** 四列，联动真实生成速率与高额消费标红提醒。
@@ -98,8 +98,8 @@
 - 所有工具日志与 SQLite 数据库均以**只读方式**打开，绝不写入或篡改第三方会话目录。
 - 全部使用统计与自定义配置仅保存在本机 `~/.ai-token-hud/`，不上传任何遥测数据或代码内容。
 - 仅有的两项**可选联网请求**（均可在设置中关闭）：
-  1. 汇率获取：通过系统自带 `curl.exe` 访问 `open.er-api.com` / `api.exchangerate-api.com`。
-  2. 在线模型定价同步：访问 `models.dev` / `openrouter.ai` 获取公开模型目录单价。
+  1. 汇率获取：通过 Windows 原生 WinHTTP API（不拉起任何外部命令行进程）访问 `open.er-api.com` / `api.exchangerate-api.com`。
+  2. 在线模型定价同步：同样通过 Windows 原生 WinHTTP API 访问 `models.dev` / `openrouter.ai` 获取公开模型目录单价。
 
 ---
 
@@ -156,11 +156,13 @@ target/release/ai-token-hud.exe --settings 0
 ## 代码结构
 
 ```text
+build.rs                 # 编译期生成多尺寸应用图标、UAC Manifest 与 PE VERSIONINFO 元数据
 src/
 ├── main.rs            # 单实例互斥、无边框透明窗口初始化、按停靠预设定位、分层字体加载
 ├── app.rs             # 应用主状态、事件唤醒循环、窗口尺寸与位置自适应、单测冒烟套件
 ├── collector.rs       # 采集调度（CC Switch / 原生模式）与严格按时间序的实时速率追踪
 ├── config.rs          # 配置持久化、模型单价表与别名解析、有效成本与缓存节省计算、汇率同步
+├── http_client.rs     # 基于 Windows 原生 WinHTTP 的无外部子进程 HTTPS 客户端
 ├── pricing_catalog.rs # models.dev / OpenRouter 在线定价目录异步拉取、合并与本地缓存
 ├── detector.rs        # 本机已安装 AI 编程工具探测
 ├── history_cache.rs   # T-1 历史累计加速缓存与单价变更内存重算

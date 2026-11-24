@@ -57,30 +57,14 @@ impl WinFxController {
 #[cfg(target_os = "windows")]
 fn apply_win32_fx(blur_active: bool, corner_mode: u32, click_through: bool) -> bool {
     use core::ffi::c_void;
-
-    const GWL_EXSTYLE: i32 = -20;
-    const WS_EX_LAYERED: isize = 0x0008_0000;
-    const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
 
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMSBT_NONE: u32 = 1;
-    const DWMSBT_TRANSIENTWINDOW: u32 = 3; // Desktop Acrylic (Win11 22H2+ 硬件加速无拖拽延迟)
-
-    #[repr(C)]
-    struct AccentPolicy {
-        accent_state: i32,
-        accent_flags: u32,
-        gradient_color: u32,
-        animation_id: u32,
-    }
-
-    #[repr(C)]
-    struct WindowCompositionAttribData {
-        attrib: u32,
-        pv_data: *mut c_void,
-        cb_data: usize,
-    }
+    const DWMSBT_TRANSIENTWINDOW: u32 = 3; // Desktop Acrylic (Win11 22H2+ 硬件加速)
 
     #[link(name = "dwmapi")]
     unsafe extern "system" {
@@ -92,18 +76,6 @@ fn apply_win32_fx(blur_active: bool, corner_mode: u32, click_through: bool) -> b
         ) -> i32;
     }
 
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn GetWindowLongPtrW(hwnd: *mut c_void, nIndex: i32) -> isize;
-        fn SetWindowLongPtrW(hwnd: *mut c_void, nIndex: i32, dwNewLong: isize) -> isize;
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetModuleHandleA(lpModuleName: *const u8) -> *mut c_void;
-        fn GetProcAddress(hModule: *mut c_void, lpProcName: *const u8) -> *mut c_void;
-    }
-
     let hwnd = crate::tray::find_hud_hwnd();
     if hwnd.is_null() {
         return false;
@@ -112,10 +84,12 @@ fn apply_win32_fx(blur_active: bool, corner_mode: u32, click_through: bool) -> b
     unsafe {
         // 1. 设置鼠标点击穿透样式 (WS_EX_TRANSPARENT)
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let layered_mask = (WS_EX_LAYERED | WS_EX_TRANSPARENT) as isize;
+        let transparent_mask = WS_EX_TRANSPARENT as isize;
         let new_style = if click_through {
-            ex_style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+            ex_style | layered_mask
         } else {
-            ex_style & !WS_EX_TRANSPARENT
+            ex_style & !transparent_mask
         };
         if new_style != ex_style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
@@ -129,38 +103,14 @@ fn apply_win32_fx(blur_active: bool, corner_mode: u32, click_through: bool) -> b
             core::mem::size_of::<u32>() as u32,
         );
 
-        // 3. 优先使用 Win11 22H2+ DWM Transient Acrylic，若系统不支持则平滑回退 Win10 BlurBehind
+        // 3. 使用 Win11 22H2+ 官方公开属性 DWMWA_SYSTEMBACKDROP_TYPE (Win10 自动保持半透明玻璃底色)
         let backdrop_type: u32 = if blur_active { DWMSBT_TRANSIENTWINDOW } else { DWMSBT_NONE };
-        let hr = DwmSetWindowAttribute(
+        let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE,
             (&backdrop_type as *const u32).cast::<c_void>(),
             core::mem::size_of::<u32>() as u32,
         );
-
-        if hr != 0 {
-            let user32 = GetModuleHandleA(b"user32.dll\0".as_ptr());
-            if !user32.is_null() {
-                let proc_ptr = GetProcAddress(user32, b"SetWindowCompositionAttribute\0".as_ptr());
-                if !proc_ptr.is_null() {
-                    type SetWcaFn = unsafe extern "system" fn(*mut c_void, *mut WindowCompositionAttribData) -> i32;
-                    let set_wca: SetWcaFn = core::mem::transmute(proc_ptr);
-                    // ACCENT_ENABLE_BLURBEHIND = 3 (在 Win10 下无拖拽卡顿), ACCENT_DISABLED = 0
-                    let mut policy = AccentPolicy {
-                        accent_state: if blur_active { 3 } else { 0 },
-                        accent_flags: 0,
-                        gradient_color: 0,
-                        animation_id: 0,
-                    };
-                    let mut data = WindowCompositionAttribData {
-                        attrib: 19, // WCA_ACCENT_POLICY
-                        pv_data: (&mut policy as *mut AccentPolicy).cast::<c_void>(),
-                        cb_data: core::mem::size_of::<AccentPolicy>(),
-                    };
-                    let _ = set_wca(hwnd, &mut data);
-                }
-            }
-        }
     }
     true
 }
@@ -219,6 +169,9 @@ pub fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
     }
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_SHOW,
+    };
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -226,15 +179,8 @@ pub fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
         fn GetLastError() -> u32;
         fn CloseHandle(hObject: isize) -> i32;
     }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> *mut core::ffi::c_void;
-        fn ShowWindow(hWnd: *mut core::ffi::c_void, nCmdShow: i32) -> i32;
-        fn SetForegroundWindow(hWnd: *mut core::ffi::c_void) -> i32;
-    }
 
     const ERROR_ALREADY_EXISTS: u32 = 183;
-    const SW_SHOW: i32 = 5;
 
     let name: Vec<u16> = OsStr::new("Local\\AiTokenHud_SingleInstance_v1")
         .encode_wide()

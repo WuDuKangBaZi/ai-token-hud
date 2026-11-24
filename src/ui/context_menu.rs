@@ -13,6 +13,7 @@ pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &Theme
     let lang = app.config.lang();
     let menu_w = 276.0;
     let is_bottom = app.is_bottom_dock();
+    let bar_rect = app.hud_bar_rect(ctx.screen_rect());
     let target_pos = if let Some(pos) = app.context_menu_pos {
         let x = pos.x.min(app.current_bar_width - menu_w - 4.0).max(4.0);
         let y = if is_bottom {
@@ -23,7 +24,10 @@ pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &Theme
         Pos2::new(x, y)
     } else {
         let y = if is_bottom { 4.0 } else { HUD_BAR_HEIGHT + 3.0 };
-        Pos2::new((app.current_bar_width - menu_w - 4.0).max(4.0), y)
+        Pos2::new(
+            (bar_rect.max.x - menu_w).clamp(4.0, (app.current_bar_width - menu_w - 4.0).max(4.0)),
+            y,
+        )
     };
 
     let menu_response = egui::Area::new(egui::Id::new("hud_context_menu_v2"))

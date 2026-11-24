@@ -175,6 +175,9 @@ pub struct HudConfig {
     /// HUD 横条 TOTAL 汇总显示周期: "week" | "month" | "all"
     #[serde(default = "default_total_scope")]
     pub total_scope: String,
+    /// 在「仅金额」模式下悬停 HUD 是否自动展开遥测面板 (默认关闭以防鼠标路过误触放大)
+    #[serde(default)]
+    pub hover_expand_flyout: bool,
     pub visible_tools: HashMap<String, bool>,
     pub custom_pricing: HashMap<String, ModelPrice>,
 }
@@ -214,6 +217,7 @@ impl Default for HudConfig {
             dock_position: default_dock_position(),
             flyout_height: default_flyout_height(),
             total_scope: default_total_scope(),
+            hover_expand_flyout: false,
             visible_tools,
             custom_pricing: HashMap::new(),
         }
@@ -307,9 +311,6 @@ impl HudConfig {
 
     /// 从公开网络接口异步获取最新的美元兑人民币汇率
     pub fn fetch_online_exchange_rate() -> Result<f64, String> {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
         let urls = [
             "https://open.er-api.com/v6/latest/USD",
             "https://api.exchangerate-api.com/v4/latest/USD",
@@ -317,28 +318,19 @@ impl HudConfig {
 
         let mut last_err = String::new();
         for url in urls {
-            let output = std::process::Command::new("curl.exe")
-                .args(["-s", "--max-time", "5", url])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-
-            match output {
-                Ok(out) => {
-                    if out.status.success() {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                            if let Some(rate) = val.get("rates").and_then(|r| r.get("CNY")).and_then(|c| c.as_f64()) {
-                                if rate > 3.0 && rate < 20.0 {
-                                    return Ok(rate);
-                                }
+            match crate::http_client::get_bytes(url, 5) {
+                Ok(bytes) => {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        if let Some(rate) = val.get("rates").and_then(|r| r.get("CNY")).and_then(|c| c.as_f64()) {
+                            if rate > 3.0 && rate < 20.0 {
+                                return Ok(rate);
                             }
                         }
-                        last_err = format!("解析汇率数据失败: {}", url);
-                    } else {
-                        last_err = format!("HTTP 请求失败 (退出码 {:?}): {}", out.status.code(), url);
                     }
+                    last_err = format!("解析汇率数据失败: {}", url);
                 }
                 Err(e) => {
-                    last_err = format!("执行 curl 失败: {}", e);
+                    last_err = e;
                 }
             }
         }
@@ -928,6 +920,9 @@ mod tests {
         assert!(cfg.is_unpriced("unknown-private-model-v9", 0.0));
         assert!(!cfg.is_unpriced("unknown-private-model-v9", 0.12));
         assert!(!cfg.is_unpriced("claude-fable-5-2", 0.0));
+        assert!(!cfg.is_unpriced("gemini-4-hydrogen-tiered-high", 0.0));
+        assert!((cfg.effective_cost("gemini-4-hydrogen-tiered-high", 0.0, Usage { input: 1_000_000, output: 1_000_000, cache_read: 0, cache_write: 0 }) - 9.0).abs() < 1e-9);
+        assert!(!cfg.hover_expand_flyout);
 
         let legacy_json = r#"{"view_mode":"cost","opacity":0.9,"always_on_top":true,"mini_mode":false,"visible_tools":{},"custom_pricing":{}}"#;
         let parsed: HudConfig = serde_json::from_str(legacy_json).unwrap();
@@ -935,6 +930,7 @@ mod tests {
         assert_eq!(parsed.spike_alert_usd, 0.0);
         assert!(parsed.global_hotkeys_enabled);
         assert!(parsed.edge_snap);
+        assert!(!parsed.hover_expand_flyout);
         assert_eq!(parsed.resolved_dock_position(), "top_center");
         assert_eq!(parsed.resolved_total_scope(), "all");
         assert!((parsed.clamped_flyout_height() - 330.0).abs() < 1e-6);

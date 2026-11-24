@@ -876,6 +876,7 @@ impl StatsEngine {
             "-xhigh",
             "-extra-high",
             "-very-high",
+            "-tiered",
             "-high",
             "-medium",
             "-med",
@@ -1380,5 +1381,17 @@ mod tests {
         let today_models = StatsEngine::get_today_by_model_tree(&collector, &cfg);
         assert_eq!(today_models.len(), 1);
         assert_eq!(today_models[0].short_name, "Opus 5.5");
+    }
+
+    #[test]
+    fn test_tiered_effort_suffix_stripping() {
+        assert_eq!(
+            StatsEngine::strip_effort_suffixes("gemini-4-hydrogen-tiered-high"),
+            "gemini-4-hydrogen"
+        );
+        assert_eq!(
+            StatsEngine::strip_effort_suffixes("gemini-4-hydrogen-tiered"),
+            "gemini-4-hydrogen"
+        );
     }
 }

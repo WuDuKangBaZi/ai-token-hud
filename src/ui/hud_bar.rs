@@ -10,21 +10,48 @@ use crate::ui::icons::{self, Icon};
 pub const HUD_BAR_HEIGHT: f32 = 38.0;
 /// 右侧矢量控制区宽度：分割线 + 5 个 20x20 图标按钮 (固定/日历/设置/托盘/关闭)
 pub const HUD_BUTTONS_WIDTH: f32 = 118.0;
+/// 左侧拖拽手柄宽度 (12px 手柄 + 6.5px 间距)
+pub const HUD_GRIP_SLOT_WIDTH: f32 = 18.5;
+
+/// 计算展开态下核心遥测指标带在 `data_zone`（左侧手柄与右侧按钮分割线之间）的对称居中起始坐标与分割线单侧额外呼吸间距。
+/// 返回 `(start_x, extra_div_pad)`：当 `expanded == false` 或无剩余宽度时返回 `(data_zone.min.x, 0.0)`。
+pub fn compute_expanded_metrics_layout(
+    data_zone: Rect,
+    compact_data_w: f32,
+    div_count: usize,
+    expanded: bool,
+) -> (f32, f32) {
+    if !expanded || compact_data_w <= 0.0 {
+        return (data_zone.min.x, 0.0);
+    }
+    let slack = (data_zone.width() - compact_data_w).max(0.0);
+    if slack <= 2.0 {
+        return (data_zone.min.x, 0.0);
+    }
+    let extra_div_pad = if div_count > 0 {
+        let slots = (div_count * 2 + 2) as f32;
+        (slack / slots).min(24.0)
+    } else {
+        0.0
+    };
+    let rendered_w = compact_data_w + (div_count as f32) * extra_div_pad * 2.0;
+    let start_x = (data_zone.center().x - rendered_w * 0.5).max(data_zone.min.x);
+    (start_x, extra_div_pad)
+}
+
+fn hud_metric_vdiv(ui: &mut egui::Ui, t: &ThemeTokens, height: f32, extra_pad: f32, count: &mut usize) {
+    let total_w = 1.0 + extra_pad * 2.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total_w, height), Sense::hover());
+    let cx = rect.center().x.round();
+    let line_rect = Rect::from_min_max(Pos2::new(cx - 0.5, rect.min.y), Pos2::new(cx + 0.5, rect.max.y));
+    ui.painter().rect_filled(line_rect, 0.0, t.divider);
+    *count += 1;
+}
 
 pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Context, t: &ThemeTokens) {
     let lang = app.config.lang();
     let screen = ctx.screen_rect();
-    let bar_rect = if app.is_bottom_dock() {
-        Rect::from_min_max(
-            Pos2::new(screen.min.x, (screen.max.y - HUD_BAR_HEIGHT).max(screen.min.y)),
-            screen.max,
-        )
-    } else {
-        Rect::from_min_max(
-            screen.min,
-            Pos2::new(screen.max.x, screen.min.y + HUD_BAR_HEIGHT),
-        )
-    };
+    let bar_rect = app.hud_bar_rect(screen);
 
     let budget_ratio = app.config.budget_ratio(app.cached_today_usd);
     let c_today = budget_ratio.map_or(t.cost_gold, |r| theme::budget_color(r, t));
@@ -161,21 +188,23 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                     app.context_menu_pos = ctx.input(|i| i.pointer.latest_pos());
                 }
 
-                // 金额模式下鼠标悬停触发遥测面板展开 (带 110ms 防误触延迟，避免光标快速掠过顶边闪烁)
-                if app.config.view_mode == "cost" {
+                // 金额模式下（需在设置中显式开启）鼠标悬停触发遥测面板展开 (带 260ms 防误触延迟)
+                if app.config.hover_expand_flyout && app.config.view_mode == "cost" {
                     let is_hovering = bar_drag.hovered() || pointer_in_bar;
                     if is_hovering && !bar_drag.is_pointer_button_down_on() {
                         let start = *app.hover_enter_time.get_or_insert_with(Instant::now);
-                        if start.elapsed().as_millis() >= 110 && !app.cost_dropdown_open {
+                        if start.elapsed().as_millis() >= 260 && !app.cost_dropdown_open {
                             app.cost_dropdown_open = true;
                             ctx.request_repaint();
                         } else if !app.cost_dropdown_open {
-                            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+                            ctx.request_repaint_after(std::time::Duration::from_millis(270));
                         }
                         app.cost_dropdown_hover_time = Some(Instant::now());
                     } else {
                         app.hover_enter_time = None;
                     }
+                } else {
+                    app.hover_enter_time = None;
                 }
             }
 
@@ -272,13 +301,14 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                 });
             });
 
-            // ================= 左侧至中部：核心遥测指标带 =================
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
+            // ================= 左侧拖拽手柄 (固定靠最左) + 核心遥测指标带 (展开时自动居中) =================
+            let grip_slot_rect = Rect::from_min_max(
+                left_rect.min,
+                Pos2::new((left_rect.min.x + 12.0).min(left_rect.max.x), left_rect.max.y),
+            );
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(grip_slot_rect), |ui| {
                 ui.style_mut().interaction.selectable_labels = false;
-                let content = ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.5, 0.0);
-
-                    // 1. 拖拽点阵手柄 (2x3)
+                ui.horizontal_centered(|ui| {
                     let (grip_rect, grip_resp) = ui.allocate_exact_size(Vec2::new(12.0, 18.0), Sense::click_and_drag());
                     if !app.config.click_through {
                         if grip_resp.drag_started() {
@@ -308,6 +338,32 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                             p.circle_filled(Pos2::new(grip_rect.center().x + dx, grip_rect.center().y + dy), 1.15, dot_c);
                         }
                     }
+                });
+            });
+
+            let data_zone = Rect::from_min_max(
+                Pos2::new((left_rect.min.x + HUD_GRIP_SLOT_WIDTH).min(left_rect.max.x), left_rect.min.y),
+                left_rect.max,
+            );
+            let prev_data_w = (app.measured_content_width - HUD_GRIP_SLOT_WIDTH).max(0.0);
+            let expected_div_count = match app.config.view_mode.as_str() {
+                "cost" => 3,
+                "tool" => 2 + app.cached_today_tools.len().clamp(1, 4),
+                _ => 2 + app.cached_today_models.len().clamp(1, 3),
+            };
+            let (start_x, extra_div_pad) = compute_expanded_metrics_layout(
+                data_zone,
+                prev_data_w,
+                expected_div_count,
+                app.cost_dropdown_open,
+            );
+            let content_rect = Rect::from_min_max(Pos2::new(start_x, data_zone.min.y), data_zone.max);
+
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                ui.style_mut().interaction.selectable_labels = false;
+                let mut rendered_divs = 0usize;
+                let content = ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.5, 0.0);
 
                     // 2. 速率指示灯 + RATE 读数 + 迷你实时波形图
                     let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
@@ -349,7 +405,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                             .on_hover_text(lang.tr("最近请求输出速率趋势波形", "Recent output throughput sparkline"));
                     }
 
-                    theme::vdiv_with(ui, t, 14.0);
+                    hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
 
                     // 3. 中部多模式展示段
                     if app.config.view_mode == "cost" {
@@ -360,7 +416,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                             ui.label(RichText::new(app.config.format_secondary_cost(app.cached_today_usd)).font(theme::mono(11.0)).color(t.text_muted));
                         }
 
-                        theme::vdiv_with(ui, t, 14.0);
+                        hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
 
                         let (scope_usd, scope_tok) = app.scoped_total_values();
                         let (scope_lbl, scope_tip_title) = match app.config.resolved_total_scope() {
@@ -382,12 +438,12 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                             ui.label(RichText::new(app.config.format_secondary_cost(scope_usd)).font(theme::mono(11.0)).color(t.text_muted));
                         }
 
-                        theme::vdiv_with(ui, t, 14.0);
+                        hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                     } else if app.config.view_mode == "tool" {
                         // 仅显示当天活跃使用到的 AI 工具
                         if app.cached_today_tools.is_empty() {
                             crate::ui::pill_badge(ui, lang.tr("今日无调用", "Idle Today"), t.text_dim, t);
-                            theme::vdiv_with(ui, t, 14.0);
+                            hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                         } else {
                             for tool in app.cached_today_tools.iter().take(4) {
                                 let short_name = theme::tool_short_name(&tool.id, &tool.name);
@@ -408,7 +464,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                                 }
                                 ui.label(RichText::new(StatsEngine::format_compact(tool.total_tokens)).font(theme::mono(11.5)).color(t.text_primary));
                                 ui.label(RichText::new(app.config.format_cost(tool.total_cost_usd)).font(theme::mono(11.5)).color(t.cost_gold));
-                                theme::vdiv_with(ui, t, 14.0);
+                                hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                             }
                         }
 
@@ -418,12 +474,12 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         if app.config.hud_dual_currency {
                             ui.label(RichText::new(app.config.format_secondary_cost(app.cached_today_usd)).font(theme::mono(11.0)).color(t.text_muted));
                         }
-                        theme::vdiv_with(ui, t, 14.0);
+                        hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                     } else {
                         // 按模型展示：仅显示当天实际使用到的模型
                         if app.cached_today_models.is_empty() {
                             crate::ui::pill_badge(ui, lang.tr("今日暂无模型", "No Models Today"), t.accent, t);
-                            theme::vdiv_with(ui, t, 14.0);
+                            hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                         } else {
                             for m in app.cached_today_models.iter().take(3) {
                                 let mc = theme::model_color(&m.short_name);
@@ -435,7 +491,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                                 badge.on_hover_text(tip.trim_end());
                                 ui.label(RichText::new(StatsEngine::format_compact(m.total_tokens)).font(theme::mono(11.5)).color(t.text_primary));
                                 ui.label(RichText::new(app.config.format_cost(m.total_cost_usd)).font(theme::mono(11.5)).color(t.cost_gold));
-                                theme::vdiv_with(ui, t, 14.0);
+                                hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                             }
                         }
 
@@ -445,7 +501,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         if app.config.hud_dual_currency {
                             ui.label(RichText::new(app.config.format_secondary_cost(app.cached_today_usd)).font(theme::mono(11.0)).color(t.text_muted));
                         }
-                        theme::vdiv_with(ui, t, 14.0);
+                        hud_metric_vdiv(ui, t, 14.0, extra_div_pad, &mut rendered_divs);
                     }
 
                     // 4. Prompt 缓存命中率
@@ -489,7 +545,13 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         }
                     }
                 });
-                app.measured_content_width = content.response.rect.width();
+                let extra_total = (rendered_divs as f32) * extra_div_pad * 2.0;
+                let raw_compact_data_w = (content.response.rect.width() - extra_total).max(0.0);
+                let measured = HUD_GRIP_SLOT_WIDTH + raw_compact_data_w;
+                if app.cost_dropdown_open && (app.measured_content_width - measured).abs() > 1.0 {
+                    ctx.request_repaint();
+                }
+                app.measured_content_width = measured;
             });
         });
     });

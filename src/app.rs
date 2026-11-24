@@ -113,6 +113,7 @@ pub struct TokenHudApp {
     pub needs_reposition: bool,
     pub user_dragged_since_dock: bool,
     pub flyout_resize_anchor: Option<(f32, f32)>,
+    pub expanded_bar_offset_x: f32,
 
     // 系统监控、托盘、全局热键与原生窗口特效
     pub db_watcher: Option<crate::watcher::DbWatcher>,
@@ -279,6 +280,7 @@ impl TokenHudApp {
             needs_reposition: true,
             user_dragged_since_dock: false,
             flyout_resize_anchor: None,
+            expanded_bar_offset_x: 0.0,
             db_watcher: None,
             tray: None,
             hotkey_manager: None,
@@ -404,6 +406,7 @@ impl TokenHudApp {
         self.config.dock_position = dock.to_string();
         self.user_dragged_since_dock = false;
         self.pending_pos = None;
+        self.expanded_bar_offset_x = 0.0;
         self.needs_reposition = true;
         self.config.save();
         let w = self.current_bar_width.max(360.0);
@@ -427,32 +430,41 @@ impl TokenHudApp {
     }
 
     pub fn reposition_for_size(&mut self, ctx: &egui::Context, win_w: f32, win_h: f32) {
-        let anchor_hint = ctx
-            .input(|i| i.viewport().outer_rect)
-            .map(|r| [r.min.x, r.min.y])
-            .or(self.config.hud_pos);
-        let work = crate::win_fx::monitor_work_area_for_pos(anchor_hint, ctx.pixels_per_point());
+        let cur_outer = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]);
+        let compact_w = self.calculate_compact_bar_width();
+        let is_expanded = win_w > compact_w + 1.0 || win_h > HUD_BAR_HEIGHT + 1.0;
         let dock = self.config.resolved_dock_position();
         if dock == "custom" {
-            if let Some(cur) = anchor_hint {
-                let clamped = crate::win_fx::clamp_pos_to_work_area(cur, work, win_w, win_h, 4.0);
-                if (clamped[0] - cur[0]).abs() > 1.5 || (clamped[1] - cur[1]).abs() > 1.5 {
+            let base_pos_opt = if self.user_dragged_since_dock {
+                cur_outer.or(self.config.hud_pos)
+            } else {
+                self.config.hud_pos.or(cur_outer)
+            };
+            let work = crate::win_fx::monitor_work_area_for_pos(base_pos_opt.or(cur_outer), ctx.pixels_per_point());
+            if let Some(base_pos) = base_pos_opt {
+                let clamped = crate::win_fx::clamp_pos_to_work_area(base_pos, work, win_w, win_h, 4.0);
+                if cur_outer.map_or(true, |cur| (clamped[0] - cur[0]).abs() > 1.5 || (clamped[1] - cur[1]).abs() > 1.5) {
                     ctx.send_viewport_cmd_to(
                         ViewportId::ROOT,
                         egui::ViewportCommand::OuterPosition(egui::pos2(clamped[0], clamped[1])),
                     );
                 }
-                if win_h <= HUD_BAR_HEIGHT + 1.0 {
+                if is_expanded {
+                    self.expanded_bar_offset_x = (base_pos[0] - clamped[0]).clamp(0.0, (win_w - compact_w).max(0.0));
+                } else {
+                    self.expanded_bar_offset_x = 0.0;
                     self.config.hud_pos = Some(clamped);
                 }
             }
         } else {
+            self.expanded_bar_offset_x = 0.0;
+            let work = crate::win_fx::monitor_work_area_for_pos(cur_outer.or(self.config.hud_pos), ctx.pixels_per_point());
             let target = crate::win_fx::compute_dock_pos(dock, work, win_w, win_h, 8.0);
             ctx.send_viewport_cmd_to(
                 ViewportId::ROOT,
                 egui::ViewportCommand::OuterPosition(egui::pos2(target[0], target[1])),
             );
-            if win_h <= HUD_BAR_HEIGHT + 1.0 {
+            if !is_expanded {
                 self.config.hud_pos = Some(target);
             }
         }
@@ -564,10 +576,10 @@ impl TokenHudApp {
         );
     }
 
-    pub fn calculate_target_width(&self) -> f32 {
+    pub fn calculate_compact_bar_width(&self) -> f32 {
         let right_w = if self.config.click_through { 68.0 } else { HUD_BUTTONS_WIDTH };
         let collapsed_min = 360.0_f32;
-        let base_bar_w = if self.measured_content_width > 0.0 {
+        if self.measured_content_width > 0.0 {
             let raw = self.measured_content_width + right_w + 30.0;
             ((raw / 8.0).ceil() * 8.0).max(collapsed_min)
         } else {
@@ -579,7 +591,46 @@ impl TokenHudApp {
                 0
             };
             (440.0 + count as f32 * 135.0).max(collapsed_min)
+        }
+    }
+
+    pub fn current_bar_offset_x(&self, viewport_w: f32) -> f32 {
+        if self.cost_dropdown_open {
+            return 0.0;
+        }
+        let bar_w = self.calculate_compact_bar_width().min(viewport_w);
+        let extra_w = (viewport_w - bar_w).max(0.0);
+        match self.config.resolved_dock_position() {
+            "top_left" | "bottom_left" => 0.0,
+            "top_right" | "bottom_right" => extra_w,
+            "top_center" => (extra_w * 0.5).floor(),
+            _ => self.expanded_bar_offset_x.clamp(0.0, extra_w),
+        }
+    }
+
+    pub fn hud_bar_rect(&self, screen: egui::Rect) -> egui::Rect {
+        let (min_x, max_x) = if self.cost_dropdown_open {
+            (screen.min.x, screen.max.x)
+        } else {
+            let bar_w = self.calculate_compact_bar_width().min(screen.width());
+            let min_x = screen.min.x + self.current_bar_offset_x(screen.width());
+            (min_x, (min_x + bar_w).min(screen.max.x))
         };
+        if self.is_bottom_dock() {
+            egui::Rect::from_min_max(
+                egui::Pos2::new(min_x, (screen.max.y - HUD_BAR_HEIGHT).max(screen.min.y)),
+                egui::Pos2::new(max_x, screen.max.y),
+            )
+        } else {
+            egui::Rect::from_min_max(
+                egui::Pos2::new(min_x, screen.min.y),
+                egui::Pos2::new(max_x, (screen.min.y + HUD_BAR_HEIGHT).min(screen.max.y)),
+            )
+        }
+    }
+
+    pub fn calculate_target_width(&self) -> f32 {
+        let base_bar_w = self.calculate_compact_bar_width();
 
         if self.cost_dropdown_open {
             base_bar_w.max(760.0)
@@ -773,8 +824,15 @@ impl TokenHudApp {
                                 } else {
                                     [pos.x, pos.y]
                                 };
+                                let offset_x = self.current_bar_offset_x(self.current_bar_width.max(360.0));
+                                let offset_y = if self.is_bottom_dock() {
+                                    (self.current_bar_height - HUD_BAR_HEIGHT).max(0.0)
+                                } else {
+                                    0.0
+                                };
+                                self.expanded_bar_offset_x = offset_x;
                                 self.config.dock_position = "custom".to_string();
-                                self.config.hud_pos = Some(final_pos);
+                                self.config.hud_pos = Some([final_pos[0] + offset_x, final_pos[1] + offset_y]);
                                 self.config.save();
                                 self.pending_pos = None;
                                 self.user_dragged_since_dock = false;
@@ -962,6 +1020,7 @@ mod tests {
         app.config.daily_budget_usd = 15.0;
         app.config.monthly_budget_usd = 200.0;
         app.config.spike_alert_usd = 1.0;
+        app.config.click_through = false;
         app.show_settings_window = true;
         app.show_context_menu = true;
 
@@ -1133,5 +1192,74 @@ mod tests {
                 }
             });
         });
+    }
+
+    #[test]
+    fn test_hud_bar_rect_stretches_when_expanded_and_stays_compact_when_collapsed() {
+        let mut app = TokenHudApp::new_headless();
+        app.config.view_mode = "cost".to_string();
+        app.config.click_through = false;
+        app.measured_content_width = 300.0;
+        let compact_w = app.calculate_compact_bar_width();
+        assert!(compact_w < 760.0, "compact_w={} should stay below expanded flyout width", compact_w);
+
+        let expanded_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 372.0));
+
+        // 收起态：保持紧凑宽度并按停靠方式对齐
+        app.cost_dropdown_open = false;
+        app.config.dock_position = "top_left".to_string();
+        let tl = app.hud_bar_rect(expanded_screen);
+        assert!((tl.width() - compact_w).abs() < 1e-3);
+        assert!((tl.min.x - 0.0).abs() < 1e-3);
+        assert!((tl.min.y - 0.0).abs() < 1e-3);
+
+        app.config.dock_position = "top_center".to_string();
+        let tc = app.hud_bar_rect(expanded_screen);
+        assert!((tc.width() - compact_w).abs() < 1e-3);
+        assert!((tc.min.x - ((760.0 - compact_w) * 0.5).floor()).abs() < 1e-3);
+
+        app.config.dock_position = "top_right".to_string();
+        let tr = app.hud_bar_rect(expanded_screen);
+        assert!((tr.width() - compact_w).abs() < 1e-3);
+        assert!((tr.max.x - 760.0).abs() < 1e-3);
+
+        app.config.dock_position = "bottom_right".to_string();
+        let br = app.hud_bar_rect(expanded_screen);
+        assert!((br.width() - compact_w).abs() < 1e-3);
+        assert!((br.max.x - 760.0).abs() < 1e-3);
+        assert!((br.max.y - 372.0).abs() < 1e-3);
+
+        app.config.dock_position = "custom".to_string();
+        app.expanded_bar_offset_x = 188.0;
+        let cu = app.hud_bar_rect(expanded_screen);
+        assert!((cu.width() - compact_w).abs() < 1e-3);
+        assert!((cu.min.x - 188.0).abs() < 1e-3);
+
+        // 展开态：HUD 横条自动拉伸并与面板同宽 (760px)
+        app.cost_dropdown_open = true;
+        for dock in ["top_center", "top_right", "custom"] {
+            app.config.dock_position = dock.to_string();
+            let expanded = app.hud_bar_rect(expanded_screen);
+            assert!((expanded.min.x - 0.0).abs() < 1e-3);
+            assert!((expanded.max.x - 760.0).abs() < 1e-3);
+            assert!((expanded.width() - 760.0).abs() < 1e-3);
+            assert!((expanded.min.y - 0.0).abs() < 1e-3);
+        }
+        app.config.dock_position = "bottom_right".to_string();
+        let expanded_br = app.hud_bar_rect(expanded_screen);
+        assert!((expanded_br.width() - 760.0).abs() < 1e-3);
+        assert!((expanded_br.max.y - 372.0).abs() < 1e-3);
+
+        // 指标带对称居中与均匀呼吸留白校验
+        let data_zone = egui::Rect::from_min_max(egui::pos2(28.5, 5.0), egui::pos2(632.0, 33.0));
+        assert_eq!(crate::ui::hud_bar::compute_expanded_metrics_layout(data_zone, 435.5, 3, false), (28.5, 0.0));
+        let (sx, pad) = crate::ui::hud_bar::compute_expanded_metrics_layout(data_zone, 435.5, 3, true);
+        assert!((pad - 21.0).abs() < 1e-3);
+        assert!((sx - 49.5).abs() < 1e-3);
+        let rendered_w = 435.5 + 3.0 * pad * 2.0;
+        let left_margin = sx - data_zone.min.x;
+        let right_margin = data_zone.max.x - (sx + rendered_w);
+        assert!((left_margin - right_margin).abs() < 1e-3);
+        assert_eq!(crate::ui::hud_bar::compute_expanded_metrics_layout(data_zone, 602.0, 3, true), (28.5, 0.0));
     }
 }

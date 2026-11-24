@@ -779,36 +779,6 @@ pub fn parse_openrouter_json(
     })
 }
 
-fn curl_fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    #[cfg(target_os = "windows")]
-    use std::os::windows::process::CommandExt;
-    #[cfg(target_os = "windows")]
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let mut cmd = std::process::Command::new("curl.exe");
-    cmd.args(["-sS", "-L", "--compressed", "--max-time", "25", url]);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("执行 curl 失败: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "HTTP 请求失败 (退出码 {:?}): {} {}",
-            output.status.code(),
-            url,
-            stderr.trim()
-        ));
-    }
-    if output.stdout.is_empty() {
-        return Err(format!("服务端返回空响应: {}", url));
-    }
-    Ok(output.stdout)
-}
-
 /// 从公开免鉴权源拉取最新模型列表与定价（主源 models.dev，失败自动降级 OpenRouter）
 pub fn fetch_online_pricing_catalog() -> Result<OnlinePricingCatalog, String> {
     let now = chrono::Local::now();
@@ -817,14 +787,14 @@ pub fn fetch_online_pricing_catalog() -> Result<OnlinePricingCatalog, String> {
 
     let mut errors = Vec::new();
 
-    match curl_fetch_bytes(MODELS_DEV_URL)
+    match crate::http_client::get_bytes(MODELS_DEV_URL, 25)
         .and_then(|bytes| parse_models_dev_json(&bytes, now_str.clone(), now_ts))
     {
         Ok(cat) => return Ok(cat),
         Err(e) => errors.push(e),
     }
 
-    match curl_fetch_bytes(OPENROUTER_URL)
+    match crate::http_client::get_bytes(OPENROUTER_URL, 25)
         .and_then(|bytes| parse_openrouter_json(&bytes, now_str, now_ts))
     {
         Ok(cat) => return Ok(cat),
