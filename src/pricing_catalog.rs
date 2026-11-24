@@ -130,6 +130,128 @@ fn dot_dash_variants(id: &str) -> Vec<String> {
     out
 }
 
+fn clean_release_date(rd: Option<&str>) -> Option<&str> {
+    rd.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn cmp_release_date_desc(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(da), Some(db)) => db.cmp(da),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// 为内置离线模型补充已知发布日期 (YYYY-MM-DD)，确保无网络或离线模式下最新模型同样靠前显示
+fn builtin_release_date(id: &str) -> Option<&'static str> {
+    match id {
+        "gemini-4-neon" => Some("2026-11-18"),
+        "gpt-6.2-astra" | "gpt-6.2-sol" => Some("2026-11-17"),
+        "gemini-4-hydrogen" => Some("2026-11-12"),
+        "gemini-4-carbon" => Some("2026-11-10"),
+        "claude-fable-5-2" => Some("2026-11-09"),
+        "gpt-6.1-terra" => Some("2026-10-26"),
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" => Some("2026-10-23"),
+        "minimax-m3.1-flash" => Some("2026-10-19"),
+        "deepseek-v4.1-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" => Some("2026-10-17"),
+        "gemini-4-argon" => Some("2026-10-13"),
+        "claude-haiku-5-5" => Some("2026-10-07"),
+        "mistral-large-4" | "mistral-large" => Some("2026-10-06"),
+        "gpt-6.1-sol" => Some("2026-09-29"),
+        "claude-sonnet-5-5" => Some("2026-09-28"),
+        "claude-opus-5-5" | "gpt-6-sol" | "gpt-6-luna" => Some("2026-09-22"),
+        "grok-4.7" => Some("2026-09-21"),
+        "glm-5.3-flashx" => Some("2026-09-18"),
+        "gpt-6-astra" | "gpt-6-astra-fast" | "gpt-6" => Some("2026-09-04"),
+        "gemini-3.8-flash-high" | "gemini-3.8-flash" => Some("2026-09-02"),
+        "claude-fable-5-1" => Some("2026-09-01"),
+        "hunyuan-4" => Some("2026-08-28"),
+        "glm-5.3-flash" | "qwen3.8-flash" => Some("2026-08-26"),
+        "glm-5.3" => Some("2026-08-14"),
+        "deepseek-v4-pro" | "gemini-3.7-flash" => Some("2026-08-13"),
+        "grok-4.6" => Some("2026-08-12"),
+        "qwen3.8-max" | "qwen-3.8-27b" => Some("2026-08-03"),
+        "claude-opus-5" => Some("2026-07-24"),
+        "gemini-3.6-flash" | "gemini-3.5-flash-lite" => Some("2026-07-21"),
+        "kimi-k3" => Some("2026-07-16"),
+        "qwen3.7-flash" => Some("2026-07-15"),
+        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some("2026-07-09"),
+        "grok-4.5" => Some("2026-07-08"),
+        "claude-sonnet-5" => Some("2026-06-29"),
+        "glm-5.2" => Some("2026-06-13"),
+        "kimi-k2.7-code" | "kimi-k2.7-code-highspeed" => Some("2026-06-12"),
+        "claude-fable-5" => Some("2026-06-07"),
+        "qwen3.7-plus" => Some("2026-06-02"),
+        "minimax-m3" => Some("2026-06-01"),
+        "claude-opus-4-8" => Some("2026-05-28"),
+        "qwen3.7-max" => Some("2026-05-21"),
+        "command-a-plus-05-2026" => Some("2026-05-20"),
+        "gemini-3.5-flash" => Some("2026-05-19"),
+        "gemini-3.1-flash-lite" => Some("2026-05-07"),
+        "mistral-medium-2604" => Some("2026-04-29"),
+        "qwen3.6-flash" => Some("2026-04-27"),
+        "gpt-5.5" | "gpt-5.5-pro" => Some("2026-04-23"),
+        "qwen3.6-max-preview" | "kimi-k2.6" => Some("2026-04-20"),
+        "grok-4.3" => Some("2026-04-17"),
+        "claude-opus-4-7" => Some("2026-04-14"),
+        "glm-5.1" => Some("2026-04-07"),
+        "qwen-3.6-plus" => Some("2026-04-02"),
+        "minimax-m2.7" | "minimax-m2.7-highspeed" => Some("2026-03-18"),
+        "gpt-5.4-mini" | "gpt-5.4-nano" => Some("2026-03-17"),
+        "glm-5-turbo" | "mistral-small-2603" | "mistral-small" => Some("2026-03-16"),
+        "grok-4.20-0309-reasoning" => Some("2026-03-09"),
+        "gpt-5.4" | "gpt-5.4-pro" => Some("2026-03-05"),
+        "qwen3.5-flash" => Some("2026-02-23"),
+        "gemini-3.1-pro-preview" => Some("2026-02-19"),
+        "claude-sonnet-4-6" => Some("2026-02-17"),
+        "qwen3.5-plus" => Some("2026-02-16"),
+        "glm-5" | "minimax-m2.5" | "minimax-m2.5-highspeed" => Some("2026-02-12"),
+        "gpt-5.3-codex" => Some("2026-02-05"),
+        "claude-opus-4-6" => Some("2026-02-04"),
+        "glm-4.7-flash" => Some("2026-01-19"),
+        "glm-4.7" => Some("2025-12-22"),
+        "gemini-3-flash-preview" => Some("2025-12-17"),
+        "gpt-5.2" | "gpt-5.2-pro" => Some("2025-12-11"),
+        "claude-opus-4-5" => Some("2025-11-24"),
+        "gpt-5.1" => Some("2025-11-13"),
+        "claude-haiku-4-5" => Some("2025-10-15"),
+        "gpt-5-pro" => Some("2025-10-06"),
+        "glm-4.6" => Some("2025-09-30"),
+        "claude-sonnet-4-5" => Some("2025-09-29"),
+        "qwen3-max" => Some("2025-09-23"),
+        "gpt-5" | "gpt-5-mini" | "gpt-5-nano" => Some("2025-08-07"),
+        "codestral-2508" | "codestral" => Some("2025-07-30"),
+        "glm-4.5" | "qwen3-coder-flash" | "qwen-flash" => Some("2025-07-28"),
+        "qwen3-coder-plus" => Some("2025-07-23"),
+        "gemini-2.5-pro" | "gemini-2.5-flash" | "gemini-2.5-flash-lite" => Some("2025-06-17"),
+        "o3-pro" => Some("2025-06-10"),
+        "o3" => Some("2025-04-16"),
+        "gpt-4.1" | "gpt-4.1-mini" => Some("2025-04-14"),
+        "command-a-03-2025" => Some("2025-03-13"),
+        "gpt-4.5-preview" | "gpt-4.5" => Some("2025-02-27"),
+        "claude-3-7-sonnet" => Some("2025-02-24"),
+        "gemini-2.0-flash" | "gemini-2.0-flash-lite" | "gemini-2.0-pro" => Some("2025-02-05"),
+        "o3-mini" => Some("2025-01-31"),
+        "deepseek-reasoner" => Some("2025-01-20"),
+        "deepseek-chat" => Some("2024-12-26"),
+        "command-r7b" => Some("2024-12-13"),
+        "llama-3.3-70b" => Some("2024-12-06"),
+        "claude-3-5-haiku" | "claude-3-5-sonnet" => Some("2024-10-22"),
+        "o1" | "o1-mini" => Some("2024-09-12"),
+        "command-r" | "command-r-plus" => Some("2024-08-30"),
+        "llama-3.1-405b" | "llama-3.1-70b" | "llama-3.1-8b" => Some("2024-07-23"),
+        "gpt-4o-mini" => Some("2024-07-18"),
+        "gemini-1.5-pro" | "gemini-1.5-flash" | "gemini-1.5-flash-8b" => Some("2024-05-14"),
+        "gpt-4o" => Some("2024-05-13"),
+        "gpt-4-turbo" => Some("2024-04-09"),
+        "claude-3-opus" | "claude-3-haiku" => Some("2024-03-04"),
+        "gpt-4" => Some("2023-03-14"),
+        "gpt-3.5-turbo" => Some("2023-03-01"),
+        _ => None,
+    }
+}
+
 impl CatalogStore {
     /// 从可选在线目录与内置表合并构建完整查询索引（纯函数，无磁盘/全局状态副作用）
     pub fn build(online: Option<&OnlinePricingCatalog>) -> Self {
@@ -139,7 +261,7 @@ impl CatalogStore {
                 id: id.to_string(),
                 provider: provider.to_string(),
                 price,
-                release_date: None,
+                release_date: builtin_release_date(id).map(str::to_string),
                 from_online: false,
             })
             .collect();
@@ -159,13 +281,16 @@ impl CatalogStore {
                 online_count += 1;
                 if let Some(&idx) = id_to_idx.get(&norm) {
                     merged_list[idx].price = m.price.clone();
-                    if m.release_date.is_some() {
-                        merged_list[idx].release_date = m.release_date.clone();
+                    if let Some(rd) = clean_release_date(m.release_date.as_deref()) {
+                        merged_list[idx].release_date = Some(rd.to_string());
                     }
                     merged_list[idx].from_online = true;
                 } else {
                     let mut entry = m.clone();
                     entry.id = norm.clone();
+                    entry.release_date = clean_release_date(m.release_date.as_deref())
+                        .map(str::to_string)
+                        .or_else(|| builtin_release_date(&norm).map(str::to_string));
                     entry.from_online = true;
                     id_to_idx.insert(norm, merged_list.len());
                     merged_list.push(entry);
@@ -180,21 +305,17 @@ impl CatalogStore {
             (None, None, 0)
         };
 
-        // 排序：厂商优先级 -> 发布日期降序（在线新模型优先） -> 内置/字母序
+        // 排序：最新发布的模型排最前 -> 厂商优先级 -> 原始定义顺序 -> ID 字母序
         let mut indexed: Vec<(usize, CatalogModel)> = merged_list.into_iter().enumerate().collect();
         indexed.sort_by(|(ia, a), (ib, b)| {
-            provider_sort_rank(&a.provider)
-                .cmp(&provider_sort_rank(&b.provider))
-                .then_with(|| a.provider.cmp(&b.provider))
-                .then_with(|| {
-                    match (&b.release_date, &a.release_date) {
-                        (Some(db), Some(da)) => db.cmp(da),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => ia.cmp(ib),
-                    }
-                })
-                .then_with(|| a.id.cmp(&b.id))
+            cmp_release_date_desc(
+                clean_release_date(a.release_date.as_deref()),
+                clean_release_date(b.release_date.as_deref()),
+            )
+            .then_with(|| provider_sort_rank(&a.provider).cmp(&provider_sort_rank(&b.provider)))
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| ia.cmp(ib))
+            .then_with(|| a.id.cmp(&b.id))
         });
         let merged_list: Vec<CatalogModel> = indexed.into_iter().map(|(_, m)| m).collect();
 
@@ -245,11 +366,16 @@ impl CatalogStore {
         if let Some(p) = self.exact_map.get(&clean) {
             return Some(p.clone());
         }
-        if let Some(sub) = clean.rsplit('/').next() {
-            if sub != clean {
-                if let Some(p) = self.exact_map.get(sub) {
-                    return Some(p.clone());
-                }
+        let sub = clean.rsplit('/').next().unwrap_or(&clean);
+        if sub != clean {
+            if let Some(p) = self.exact_map.get(sub) {
+                return Some(p.clone());
+            }
+        }
+        let stripped = crate::stats::StatsEngine::strip_effort_suffixes(sub);
+        if stripped != sub {
+            if let Some(p) = self.exact_map.get(&stripped) {
+                return Some(p.clone());
             }
         }
         None
@@ -892,5 +1018,57 @@ mod tests {
         );
         let u = crate::config::Usage { input: 1_000_000, output: 1_000_000, cache_read: 0, cache_write: 0 };
         assert!((cfg.effective_cost("claude-fable-5-2", 0.0, u) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_catalog_sorted_newest_release_first() {
+        // 1. 纯离线目录：最新发布的模型应排在前列，早期模型排在后半段
+        let offline = CatalogStore::build(None);
+        let pos_neon = offline.merged_list.iter().position(|m| m.id == "gemini-4-neon").unwrap();
+        let pos_astra62 = offline.merged_list.iter().position(|m| m.id == "gpt-6.2-astra").unwrap();
+        let pos_fable52 = offline.merged_list.iter().position(|m| m.id == "claude-fable-5-2").unwrap();
+        let pos_gpt35 = offline.merged_list.iter().position(|m| m.id == "gpt-3.5-turbo").unwrap();
+        assert!(pos_neon < 3 && pos_astra62 < 5 && pos_fable52 < 10);
+        assert!(pos_neon < pos_astra62 && pos_astra62 < pos_fable52 && pos_fable52 < pos_gpt35);
+
+        // 2. 在线合并：带最新 release_date 的模型排最前，无 release_date 的模型不会抢到前面
+        let online = OnlinePricingCatalog {
+            source: "models.dev".into(),
+            updated_at: "2026-11-24 14:25:00".into(),
+            updated_ts: 1795501500,
+            models: vec![
+                CatalogModel {
+                    id: "brand-new-future-model".into(),
+                    provider: "Cohere".into(),
+                    price: ModelPrice {
+                        display_name: "Brand New Future".into(),
+                        input: 1.0,
+                        output: 2.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    release_date: Some("2026-11-24".into()),
+                    from_online: true,
+                },
+                CatalogModel {
+                    id: "undated-online-model".into(),
+                    provider: "Anthropic Claude".into(),
+                    price: ModelPrice {
+                        display_name: "Undated Model".into(),
+                        input: 1.0,
+                        output: 2.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    release_date: None,
+                    from_online: true,
+                },
+            ],
+        };
+        let merged = CatalogStore::build(Some(&online));
+        assert_eq!(merged.merged_list[0].id, "brand-new-future-model");
+        let pos_undated = merged.merged_list.iter().position(|m| m.id == "undated-online-model").unwrap();
+        let pos_dated_old = merged.merged_list.iter().position(|m| m.id == "gpt-3.5-turbo").unwrap();
+        assert!(pos_undated > pos_dated_old, "无发布日期条目应排在有日期条目之后");
     }
 }

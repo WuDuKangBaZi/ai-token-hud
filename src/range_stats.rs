@@ -4,6 +4,8 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::collector::TokenCollector;
 use crate::config::{HudConfig, Usage};
+use crate::history_cache::query_rollup_dates;
+use crate::stats::{ModelStats, StatsEngine, SubModelStats, SubToolStats, ToolStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RangePreset {
@@ -43,8 +45,11 @@ pub struct ModelRangeStat {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
     pub total_tokens: i64,
     pub total_cost_usd: f64,
+    pub cache_saved_usd: f64,
+    pub is_unpriced: bool,
     pub request_count: usize,
 }
 
@@ -58,8 +63,10 @@ pub struct RangeSummary {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
     pub total_cache_read_tokens: i64,
+    pub total_cache_creation_tokens: i64,
     pub total_tokens: i64,
     pub total_cost_usd: f64,
+    pub total_cache_saved_usd: f64,
     pub total_requests: usize,
     pub models: Vec<ModelRangeStat>,
 }
@@ -73,17 +80,39 @@ pub struct DaySummary {
     pub request_count: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RangeBreakdown {
+    pub range_text: String,
+    pub tools: Vec<ToolStats>,
+    pub models: Vec<ModelStats>,
+    pub total_cost_usd: f64,
+    pub total_tokens: i64,
+    pub total_requests: usize,
+}
+
 pub struct RangeStatsCalculator;
 
 impl RangeStatsCalculator {
-    /// 计算指定预置或自定义范围的时间戳区间及描述
+    /// 计算指定预置或自定义范围的时间戳区间及描述 (默认简体中文，供单测或兼容调用)
+    #[allow(dead_code)]
     pub fn calculate_bounds(
         preset: RangePreset,
         custom_start: Option<NaiveDate>,
         custom_end: Option<NaiveDate>,
     ) -> (i64, i64, String) {
+        Self::calculate_bounds_localized(preset, custom_start, custom_end, crate::i18n::Lang::Zh)
+    }
+
+    /// 计算指定预置或自定义范围的时间戳区间及本地化描述
+    pub fn calculate_bounds_localized(
+        preset: RangePreset,
+        custom_start: Option<NaiveDate>,
+        custom_end: Option<NaiveDate>,
+        lang: crate::i18n::Lang,
+    ) -> (i64, i64, String) {
         let now = Local::now();
         let now_ts = now.timestamp();
+        let is_en = lang.is_en();
 
         let today_start_dt = now
             .date_naive()
@@ -99,30 +128,51 @@ impl RangeStatsCalculator {
                     .map(|dt| dt.format("%m-%d %H:%M").to_string())
                     .unwrap_or_default();
                 let end_str = now.format("%m-%d %H:%M").to_string();
-                (start_ts, now_ts, format!("最近 24 小时 ({} ~ {})", start_str, end_str))
+                let desc = if is_en {
+                    format!("Last 24 Hours ({} ~ {})", start_str, end_str)
+                } else {
+                    format!("最近 24 小时 ({} ~ {})", start_str, end_str)
+                };
+                (start_ts, now_ts, desc)
             }
             RangePreset::Today => {
-                let desc = format!("今天 ({})", now.format("%Y-%m-%d"));
+                let desc = if is_en {
+                    format!("Today ({})", now.format("%Y-%m-%d"))
+                } else {
+                    format!("今天 ({})", now.format("%Y-%m-%d"))
+                };
                 (today_start, now_ts, desc)
             }
             RangePreset::Yesterday => {
                 let yest_start = today_start - 86400;
                 let yest_end = today_start - 1;
                 let yest_dt = Local.timestamp_opt(yest_start, 0).single().unwrap_or(now);
-                let desc = format!("昨天 ({})", yest_dt.format("%Y-%m-%d"));
+                let desc = if is_en {
+                    format!("Yesterday ({})", yest_dt.format("%Y-%m-%d"))
+                } else {
+                    format!("昨天 ({})", yest_dt.format("%Y-%m-%d"))
+                };
                 (yest_start, yest_end, desc)
             }
             RangePreset::ThisWeek => {
                 let weekday = now.weekday().num_days_from_monday() as i64;
                 let week_start = today_start - weekday * 86400;
                 let week_dt = Local.timestamp_opt(week_start, 0).single().unwrap_or(now);
-                let desc = format!("本周 (周一 {} 至今)", week_dt.format("%m-%d"));
+                let desc = if is_en {
+                    format!("This Week (Since Mon {})", week_dt.format("%m-%d"))
+                } else {
+                    format!("本周 (周一 {} 至今)", week_dt.format("%m-%d"))
+                };
                 (week_start, now_ts, desc)
             }
             RangePreset::Week7Days => {
                 let start_ts = now_ts - 7 * 86400;
                 let start_dt = Local.timestamp_opt(start_ts, 0).single().unwrap_or(now);
-                let desc = format!("一周内 (7天: {} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"));
+                let desc = if is_en {
+                    format!("Last 7 Days ({} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"))
+                } else {
+                    format!("一周内 (7天: {} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"))
+                };
                 (start_ts, now_ts, desc)
             }
             RangePreset::ThisMonth => {
@@ -133,17 +183,30 @@ impl RangeStatsCalculator {
                     .and_then(|dt| dt.and_local_timezone(Local).single())
                     .map(|dt| dt.timestamp())
                     .unwrap_or(today_start);
-                let desc = format!("本月 ({}月1日 至今)", now.format("%Y年%m"));
+                let desc = if is_en {
+                    format!("This Month ({} 01 to date)", now.format("%Y-%m"))
+                } else {
+                    format!("本月 ({}月1日 至今)", now.format("%Y年%m"))
+                };
                 (month_start, now_ts, desc)
             }
             RangePreset::Month30Days => {
                 let start_ts = now_ts - 30 * 86400;
                 let start_dt = Local.timestamp_opt(start_ts, 0).single().unwrap_or(now);
-                let desc = format!("一月内 (30天: {} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"));
+                let desc = if is_en {
+                    format!("Last 30 Days ({} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"))
+                } else {
+                    format!("一月内 (30天: {} ~ {})", start_dt.format("%m-%d"), now.format("%m-%d"))
+                };
                 (start_ts, now_ts, desc)
             }
             RangePreset::All => {
-                (0, now_ts + 86400, "全部历史记录".to_string())
+                let desc = if is_en {
+                    "All Time History".to_string()
+                } else {
+                    "全部历史记录".to_string()
+                };
+                (0, now_ts + 86400, desc)
             }
             RangePreset::Custom => {
                 let s_date = custom_start.unwrap_or_else(|| now.date_naive());
@@ -162,11 +225,151 @@ impl RangeStatsCalculator {
                     .unwrap_or(now_ts);
 
                 let desc = if min_d == max_d {
-                    format!("自定义日期: {}", min_d.format("%Y-%m-%d"))
+                    if is_en {
+                        format!("Custom Date: {}", min_d.format("%Y-%m-%d"))
+                    } else {
+                        format!("自定义日期: {}", min_d.format("%Y-%m-%d"))
+                    }
+                } else if is_en {
+                    format!("Custom Range: {} to {}", min_d.format("%Y-%m-%d"), max_d.format("%Y-%m-%d"))
                 } else {
                     format!("自定义范围: {} 至 {}", min_d.format("%Y-%m-%d"), max_d.format("%Y-%m-%d"))
                 };
                 (start_ts, end_ts, desc)
+            }
+        }
+    }
+
+    /// 遍历指定区间内经可见性过滤的所有历史与今日原始行（供 RangeSummary 与 RangeBreakdown 复用）
+    fn for_each_range_row<F>(
+        collector: &TokenCollector,
+        config: &HudConfig,
+        start_ts: i64,
+        end_ts: i64,
+        mut on_row: F,
+    ) where
+        F: FnMut(&str, &str, i64, i64, i64, i64, f64, usize),
+    {
+        let use_ccswitch = config.resolved_driver_mode() == "ccswitch"
+            || (config.resolved_driver_mode() == "auto" && collector.db_path.exists());
+        let tool_visible = |app_type: &str| config.view_mode == "cost" || config.is_tool_visible(app_type);
+
+        let start_date_str = Local
+            .timestamp_opt(start_ts, 0)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "1970-01-01".to_string());
+        let end_date_str = Local
+            .timestamp_opt(end_ts, 0)
+            .single()
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "2099-12-31".to_string());
+
+        if use_ccswitch && collector.db_path.exists() {
+            if let Ok(conn) = Connection::open_with_flags(
+                &collector.db_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            ) {
+                let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
+                let rollup_dates = query_rollup_dates(&conn);
+
+                let rollups_query = "
+                    SELECT app_type, model, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, cache_creation_tokens
+                    FROM usage_daily_rollups
+                    WHERE date >= ? AND date <= ?
+                ";
+                if let Ok(mut r_stmt) = conn.prepare(rollups_query) {
+                    if let Ok(r_rows) = r_stmt.query_map([&start_date_str, &end_date_str], |row| {
+                        let raw_app: String = row.get::<_, String>(0).unwrap_or_else(|_| "custom".into());
+                        let app_type = TokenCollector::normalize_app_type(&raw_app);
+                        let m: String = row.get(1).unwrap_or_else(|_| "unknown".into());
+                        let cost_str: Option<String> = row.get(2).ok();
+                        let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        let inp: i64 = row.get(3).unwrap_or(0);
+                        let out: i64 = row.get(4).unwrap_or(0);
+                        let cache: i64 = row.get(5).unwrap_or(0);
+                        let reqs: usize = row.get::<_, i64>(6).unwrap_or(1) as usize;
+                        let cw: i64 = row.get(7).unwrap_or(0);
+                        Ok((app_type, m, cost, inp, out, cache, reqs, cw))
+                    }) {
+                        for (app_type, raw_m, cost, inp, out, cache, reqs, cw) in r_rows.flatten() {
+                            if tool_visible(&app_type) {
+                                on_row(&app_type, &raw_m, inp, out, cache, cw, cost, reqs);
+                            }
+                        }
+                    }
+                }
+
+                let query = "
+                    SELECT app_type, model, input_tokens, output_tokens, cache_read_tokens, total_cost_usd, cache_creation_tokens, created_at
+                    FROM proxy_request_logs
+                    WHERE created_at >= ? AND created_at <= ?
+                ";
+                if let Ok(mut stmt) = conn.prepare(query) {
+                    if let Ok(rows) = stmt.query_map([start_ts, end_ts], |row| {
+                        let raw_app: String = row.get::<_, String>(0).unwrap_or_else(|_| "custom".into());
+                        let app_type = TokenCollector::normalize_app_type(&raw_app);
+                        let m: String = row.get(1).unwrap_or_else(|_| "unknown".into());
+                        let inp: i64 = row.get(2).unwrap_or(0);
+                        let out: i64 = row.get(3).unwrap_or(0);
+                        let cache: i64 = row.get(4).unwrap_or(0);
+                        let cost_str: Option<String> = row.get(5).ok();
+                        let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                        let cw: i64 = row.get(6).unwrap_or(0);
+                        let ts: i64 = row.get(7).unwrap_or(0);
+                        Ok((app_type, m, inp, out, cache, cost, cw, ts))
+                    }) {
+                        for (app_type, raw_m, inp, out, cache, cost, cw, ts) in rows.flatten() {
+                            if !tool_visible(&app_type) {
+                                continue;
+                            }
+                            if !rollup_dates.is_empty() {
+                                if let Some(dt) = Local.timestamp_opt(ts, 0).single() {
+                                    if rollup_dates.contains(&dt.format("%Y-%m-%d").to_string()) {
+                                        continue;
+                                    }
+                                }
+                            }
+                            on_row(&app_type, &raw_m, inp, out, cache, cw, cost, 1);
+                        }
+                    }
+                }
+            }
+        } else {
+            // 原生扫描模式：内存历史日归档 (T-1) + 今日内存实时记录 (collector.records)
+            let today_str = Local::now().format("%Y-%m-%d").to_string();
+            for entry in collector.native_scanner.daily_archive.entries.values() {
+                if entry.date < today_str
+                    && entry.date >= start_date_str
+                    && entry.date <= end_date_str
+                    && tool_visible(&entry.app_type)
+                {
+                    on_row(
+                        &entry.app_type,
+                        &entry.model,
+                        entry.input_tokens,
+                        entry.output_tokens,
+                        entry.cache_read_tokens,
+                        entry.cache_creation_tokens,
+                        0.0,
+                        entry.request_count,
+                    );
+                }
+            }
+
+            for r in &collector.records {
+                if r.created_at >= start_ts && r.created_at <= end_ts && tool_visible(&r.app_type) {
+                    on_row(
+                        &r.app_type,
+                        &r.model,
+                        r.input_tokens,
+                        r.output_tokens,
+                        r.cache_read_tokens,
+                        r.cache_creation_tokens,
+                        r.total_cost_usd,
+                        1,
+                    );
+                }
             }
         }
     }
@@ -179,145 +382,56 @@ impl RangeStatsCalculator {
         custom_start: Option<NaiveDate>,
         custom_end: Option<NaiveDate>,
     ) -> RangeSummary {
-        let (start_ts, end_ts, range_text) = Self::calculate_bounds(preset, custom_start, custom_end);
-
+        let (start_ts, end_ts, range_text) = Self::calculate_bounds_localized(preset, custom_start, custom_end, config.lang());
         let mut models_map: HashMap<String, ModelRangeStat> = HashMap::new();
 
-        let use_ccswitch = config.resolved_driver_mode() == "ccswitch"
-            || (config.resolved_driver_mode() == "auto" && collector.db_path.exists());
+        Self::for_each_range_row(collector, config, start_ts, end_ts, |_app, raw_m, inp, out, cache, cw, recorded_usd, reqs| {
+            let clean_m = raw_m.split('/').last().unwrap_or(raw_m).trim();
+            let usage = Usage { input: inp, output: out, cache_read: cache, cache_write: cw };
+            let cost = config.effective_cost(clean_m, recorded_usd, usage);
+            let saved = config.cache_savings_usd(clean_m, cache);
+            let unpriced = config.is_unpriced(clean_m, recorded_usd);
+            let short_key = StatsEngine::short_model_name(clean_m);
+            let canonical = StatsEngine::canonical_model_id(clean_m);
 
-        if use_ccswitch && collector.db_path.exists() {
-            if let Ok(conn) = Connection::open_with_flags(
-                &collector.db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            ) {
-                // 1. 如果 start_ts 覆盖到 2026-10-10 之前的早期归档历史，查询 usage_daily_rollups
-                let start_date_str = Local.timestamp_opt(start_ts, 0).single()
-                    .map(|dt| dt.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "1970-01-01".to_string());
-                let end_date_str = Local.timestamp_opt(end_ts, 0).single()
-                    .map(|dt| dt.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "2099-12-31".to_string());
-
-                let rollups_query = "
-                    SELECT model, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, cache_creation_tokens
-                    FROM usage_daily_rollups
-                    WHERE date >= ? AND date <= ?
-                ";
-                if let Ok(mut r_stmt) = conn.prepare(rollups_query) {
-                    if let Ok(r_rows) = r_stmt.query_map([&start_date_str, &end_date_str], |row| {
-                        let m: String = row.get(0).unwrap_or_else(|_| "unknown".into());
-                        let cost_str: Option<String> = row.get(2).ok();
-                        let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        let inp: i64 = row.get(3).unwrap_or(0);
-                        let out: i64 = row.get(4).unwrap_or(0);
-                        let cache: i64 = row.get(5).unwrap_or(0);
-                        let reqs: usize = row.get::<_, i64>(6).unwrap_or(1) as usize;
-                        let cw: i64 = row.get(7).unwrap_or(0);
-                        Ok((m, cost, inp, out, cache, reqs, cw))
-                    }) {
-                        for r in r_rows.flatten() {
-                            let (raw_m, cost, inp, out, cache, reqs, cw) = r;
-                            let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
-
-                            let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
-                                ModelRangeStat {
-                                    model: clean_m.clone(),
-                                    display_name: config.get_model_price(&clean_m).display_name.clone(),
-                                    ..Default::default()
-                                }
-                            });
-                            stat.input_tokens += inp;
-                            stat.output_tokens += out;
-                            stat.cache_read_tokens += cache;
-                            stat.total_tokens += inp + out + cache;
-                            stat.total_cost_usd += cost;
-                            stat.request_count += reqs;
-                        }
-                    }
-                }
-
-                // 2. 查询 proxy_request_logs 明细表 (按精确时间戳过滤)
-                let query = "
-                    SELECT model, input_tokens, output_tokens, cache_read_tokens, total_cost_usd, cache_creation_tokens
-                    FROM proxy_request_logs
-                    WHERE created_at >= ? AND created_at <= ?
-                ";
-                if let Ok(mut stmt) = conn.prepare(query) {
-                    if let Ok(rows) = stmt.query_map([start_ts, end_ts], |row| {
-                        let m: String = row.get(0).unwrap_or_else(|_| "unknown".into());
-                        let inp: i64 = row.get(1).unwrap_or(0);
-                        let out: i64 = row.get(2).unwrap_or(0);
-                        let cache: i64 = row.get(3).unwrap_or(0);
-                        let cost_str: Option<String> = row.get(4).ok();
-                        let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        let cw: i64 = row.get(5).unwrap_or(0);
-                        Ok((m, inp, out, cache, cost, cw))
-                    }) {
-                        for r in rows.flatten() {
-                            let (raw_m, inp, out, cache, cost, cw) = r;
-                            let clean_m = raw_m.split('/').last().unwrap_or(&raw_m).trim().to_string();
-                            let cost = config.effective_cost(&clean_m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
-
-                            let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
-                                ModelRangeStat {
-                                    model: clean_m.clone(),
-                                    display_name: config.get_model_price(&clean_m).display_name.clone(),
-                                    ..Default::default()
-                                }
-                            });
-                            stat.input_tokens += inp;
-                            stat.output_tokens += out;
-                            stat.cache_read_tokens += cache;
-                            stat.total_tokens += inp + out + cache;
-                            stat.total_cost_usd += cost;
-                            stat.request_count += 1;
-                        }
-                    }
-                }
+            let stat = models_map.entry(short_key).or_insert_with(|| ModelRangeStat {
+                model: canonical.clone(),
+                display_name: config.get_model_price(&canonical).display_name.clone(),
+                ..Default::default()
+            });
+            stat.input_tokens += inp;
+            stat.output_tokens += out;
+            stat.cache_read_tokens += cache;
+            stat.cache_creation_tokens += cw;
+            stat.total_tokens += inp + out + cache + cw;
+            stat.total_cost_usd += cost;
+            stat.cache_saved_usd += saved;
+            if unpriced {
+                stat.is_unpriced = true;
             }
-        } else {
-            // 原生扫描模式：过滤 collector.records 的会话历史明细
-            for r in &collector.records {
-                if r.created_at >= start_ts && r.created_at <= end_ts {
-                    let clean_m = r.model.split('/').last().unwrap_or(&r.model).trim().to_string();
-                    let cost = config.effective_cost(&clean_m, r.total_cost_usd, r.usage());
+            stat.request_count += reqs;
+        });
 
-                    let stat = models_map.entry(clean_m.clone()).or_insert_with(|| {
-                        ModelRangeStat {
-                            model: clean_m.clone(),
-                            display_name: config.get_model_price(&clean_m).display_name.clone(),
-                            ..Default::default()
-                        }
-                    });
-                    stat.input_tokens += r.input_tokens;
-                    stat.output_tokens += r.output_tokens;
-                    stat.cache_read_tokens += r.cache_read_tokens;
-                    stat.total_tokens += r.total_tokens;
-                    stat.total_cost_usd += cost;
-                    stat.request_count += 1;
-                }
-            }
-        }
-
-        // 汇总合计
         let mut model_list: Vec<ModelRangeStat> = models_map.into_values().collect();
         model_list.sort_by(|a, b| b.total_cost_usd.partial_cmp(&a.total_cost_usd).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut tot_inp = 0;
         let mut tot_out = 0;
         let mut tot_cache = 0;
+        let mut tot_cw = 0;
         let mut tot_tok = 0;
         let mut tot_cost = 0.0;
+        let mut tot_saved = 0.0;
         let mut tot_reqs = 0;
 
         for m in &model_list {
             tot_inp += m.input_tokens;
             tot_out += m.output_tokens;
             tot_cache += m.cache_read_tokens;
+            tot_cw += m.cache_creation_tokens;
             tot_tok += m.total_tokens;
             tot_cost += m.total_cost_usd;
+            tot_saved += m.cache_saved_usd;
             tot_reqs += m.request_count;
         }
 
@@ -329,10 +443,170 @@ impl RangeStatsCalculator {
             total_input_tokens: tot_inp,
             total_output_tokens: tot_out,
             total_cache_read_tokens: tot_cache,
+            total_cache_creation_tokens: tot_cw,
             total_tokens: tot_tok,
             total_cost_usd: tot_cost,
+            total_cache_saved_usd: tot_saved,
             total_requests: tot_reqs,
             models: model_list,
+        }
+    }
+
+    /// 按指定时间区间聚合工具与模型双视角下钻透视树
+    pub fn query_range_breakdown(
+        collector: &TokenCollector,
+        config: &HudConfig,
+        preset: RangePreset,
+        custom_start: Option<NaiveDate>,
+        custom_end: Option<NaiveDate>,
+    ) -> RangeBreakdown {
+        let (start_ts, end_ts, range_text) = Self::calculate_bounds_localized(preset, custom_start, custom_end, config.lang());
+        let tool_meta: HashMap<String, (String, String)> = crate::detector::ToolDetector::scan_installed_tools()
+            .into_iter()
+            .map(|t| (t.id, (t.name, t.color)))
+            .collect();
+
+        let mut tool_map: HashMap<String, ToolStats> = HashMap::new();
+        let mut tool_models_map: HashMap<String, HashMap<String, (String, i64, f64, usize)>> = HashMap::new();
+        let mut model_map: HashMap<String, ModelStats> = HashMap::new();
+        let mut model_tools_map: HashMap<String, HashMap<String, (i64, f64, usize)>> = HashMap::new();
+        let mut grand_cost = 0.0;
+        let mut grand_tokens = 0;
+        let mut grand_reqs = 0;
+
+        Self::for_each_range_row(collector, config, start_ts, end_ts, |app_type, raw_m, inp, out, cache, cw, recorded_usd, reqs| {
+            let clean_m = raw_m.split('/').last().unwrap_or(raw_m).trim();
+            let usage = Usage { input: inp, output: out, cache_read: cache, cache_write: cw };
+            let tot_tok = inp + out + cache + cw;
+            let cost = config.effective_cost(clean_m, recorded_usd, usage);
+            let short_key = StatsEngine::short_model_name(clean_m);
+            let canonical = StatsEngine::canonical_model_id(clean_m);
+            let price = config.get_model_price(&canonical);
+
+            grand_cost += cost;
+            grand_tokens += tot_tok;
+            grand_reqs += reqs;
+
+            // 工具维度累加
+            let t_entry = tool_map.entry(app_type.to_string()).or_insert_with(|| {
+                let (name, color) = tool_meta
+                    .get(app_type)
+                    .cloned()
+                    .unwrap_or_else(|| (app_type.to_uppercase(), "#94a3b8".into()));
+                ToolStats {
+                    id: app_type.to_string(),
+                    name,
+                    color,
+                    total_tokens: 0,
+                    total_cost_usd: 0.0,
+                    total_cost_cny: 0.0,
+                    request_count: 0,
+                    models: Vec::new(),
+                }
+            });
+            t_entry.total_tokens += tot_tok;
+            t_entry.total_cost_usd += cost;
+            t_entry.total_cost_cny = t_entry.total_cost_usd * config.usd_to_cny_rate;
+            t_entry.request_count += reqs;
+
+            let sub_m = tool_models_map.entry(app_type.to_string()).or_default();
+            let sm = sub_m.entry(short_key.clone()).or_insert_with(|| (canonical.clone(), 0, 0.0, 0));
+            sm.1 += tot_tok;
+            sm.2 += cost;
+            sm.3 += reqs;
+
+            // 模型维度累加
+            let m_entry = model_map.entry(short_key.clone()).or_insert_with(|| ModelStats {
+                model: canonical,
+                display_name: price.display_name,
+                short_name: short_key.clone(),
+                total_tokens: 0,
+                total_cost_usd: 0.0,
+                total_cost_cny: 0.0,
+                request_count: 0,
+                tools: Vec::new(),
+            });
+            m_entry.total_tokens += tot_tok;
+            m_entry.total_cost_usd += cost;
+            m_entry.total_cost_cny = m_entry.total_cost_usd * config.usd_to_cny_rate;
+            m_entry.request_count += reqs;
+
+            let sub_t = model_tools_map.entry(short_key).or_default();
+            let st = sub_t.entry(app_type.to_string()).or_insert((0, 0.0, 0));
+            st.0 += tot_tok;
+            st.1 += cost;
+            st.2 += reqs;
+        });
+
+        let mut tools: Vec<ToolStats> = tool_map
+            .into_iter()
+            .map(|(tid, mut stat)| {
+                if let Some(subs) = tool_models_map.remove(&tid) {
+                    for (_short, (model_name, tok, cost, count)) in subs {
+                        stat.models.push(SubModelStats {
+                            model: model_name,
+                            tokens: tok,
+                            cost,
+                            count,
+                        });
+                    }
+                    stat.models.sort_by(|a, b| {
+                        b.cost
+                            .partial_cmp(&a.cost)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| b.tokens.cmp(&a.tokens))
+                    });
+                }
+                stat
+            })
+            .collect();
+        tools.sort_by(|a, b| {
+            b.total_cost_usd
+                .partial_cmp(&a.total_cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.total_tokens.cmp(&a.total_tokens))
+        });
+
+        let mut models: Vec<ModelStats> = model_map
+            .into_iter()
+            .map(|(m_key, mut stat)| {
+                if let Some(subs) = model_tools_map.remove(&m_key) {
+                    let m_tot = stat.total_tokens;
+                    for (tid, (tok, cost, count)) in subs {
+                        let (name, color) = tool_meta
+                            .get(&tid)
+                            .cloned()
+                            .unwrap_or_else(|| (tid.to_uppercase(), "#94a3b8".into()));
+                        let pct = if m_tot > 0 { (tok as f64 / m_tot as f64) * 100.0 } else { 0.0 };
+                        stat.tools.push(SubToolStats {
+                            tool_id: tid,
+                            name,
+                            color,
+                            tokens: tok,
+                            cost,
+                            percentage: (pct * 10.0).round() / 10.0,
+                            count,
+                        });
+                    }
+                    stat.tools.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+                }
+                stat
+            })
+            .collect();
+        models.sort_by(|a, b| {
+            b.total_cost_usd
+                .partial_cmp(&a.total_cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.total_tokens.cmp(&a.total_tokens))
+        });
+
+        RangeBreakdown {
+            range_text,
+            tools,
+            models,
+            total_cost_usd: grand_cost,
+            total_tokens: grand_tokens,
+            total_requests: grand_reqs,
         }
     }
 
@@ -359,35 +633,42 @@ impl RangeStatsCalculator {
 
         let use_ccswitch = config.resolved_driver_mode() == "ccswitch"
             || (config.resolved_driver_mode() == "auto" && collector.db_path.exists());
+        let tool_visible = |app_type: &str| config.view_mode == "cost" || config.is_tool_visible(app_type);
 
         if use_ccswitch && collector.db_path.exists() {
             if let Ok(conn) = Connection::open_with_flags(
                 &collector.db_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
             ) {
-                // 1. 查询 usage_daily_rollups
+                let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
+                let rollup_dates = query_rollup_dates(&conn);
+
                 let rollups_query = "
-                    SELECT date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, model, cache_creation_tokens
+                    SELECT app_type, date, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, request_count, model, cache_creation_tokens
                     FROM usage_daily_rollups
                     WHERE date LIKE ?
                 ";
                 if let Ok(mut r_stmt) = conn.prepare(rollups_query) {
                     let param = format!("{}%", month_prefix);
                     if let Ok(r_rows) = r_stmt.query_map([&param], |row| {
-                        let date_str: String = row.get(0).unwrap_or_default();
-                        let cost_str: Option<String> = row.get(1).ok();
+                        let raw_app: String = row.get::<_, String>(0).unwrap_or_else(|_| "custom".into());
+                        let app_type = TokenCollector::normalize_app_type(&raw_app);
+                        let date_str: String = row.get(1).unwrap_or_default();
+                        let cost_str: Option<String> = row.get(2).ok();
                         let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        let inp: i64 = row.get(2).unwrap_or(0);
-                        let out: i64 = row.get(3).unwrap_or(0);
-                        let cache: i64 = row.get(4).unwrap_or(0);
-                        let reqs: usize = row.get::<_, i64>(5).unwrap_or(1) as usize;
-                        let m: String = row.get(6).unwrap_or_default();
-                        let cw: i64 = row.get(7).unwrap_or(0);
+                        let inp: i64 = row.get(3).unwrap_or(0);
+                        let out: i64 = row.get(4).unwrap_or(0);
+                        let cache: i64 = row.get(5).unwrap_or(0);
+                        let reqs: usize = row.get::<_, i64>(6).unwrap_or(1) as usize;
+                        let m: String = row.get(7).unwrap_or_default();
+                        let cw: i64 = row.get(8).unwrap_or(0);
                         let cost = config.effective_cost(&m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
-                        Ok((date_str, cost, inp + out + cache, reqs))
+                        Ok((app_type, date_str, cost, inp + out + cache + cw, reqs))
                     }) {
-                        for r in r_rows.flatten() {
-                            let (date_str, cost, tokens, reqs) = r;
+                        for (app_type, date_str, cost, tokens, reqs) in r_rows.flatten() {
+                            if !tool_visible(&app_type) {
+                                continue;
+                            }
                             if let Ok(d) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
                                 let entry = day_map.entry(d).or_insert_with(|| DaySummary { date: d, ..Default::default() });
                                 entry.total_cost_usd += cost;
@@ -398,29 +679,35 @@ impl RangeStatsCalculator {
                     }
                 }
 
-                // 2. 查询 proxy_request_logs
                 let query = "
-                    SELECT created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, model, cache_creation_tokens
+                    SELECT app_type, created_at, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, model, cache_creation_tokens
                     FROM proxy_request_logs
                     WHERE created_at >= ? AND created_at <= ?
                 ";
                 if let Ok(mut stmt) = conn.prepare(query) {
                     if let Ok(rows) = stmt.query_map([start_ts, end_ts], |row| {
-                        let ts: i64 = row.get(0).unwrap_or(0);
-                        let cost_str: Option<String> = row.get(1).ok();
+                        let raw_app: String = row.get::<_, String>(0).unwrap_or_else(|_| "custom".into());
+                        let app_type = TokenCollector::normalize_app_type(&raw_app);
+                        let ts: i64 = row.get(1).unwrap_or(0);
+                        let cost_str: Option<String> = row.get(2).ok();
                         let cost: f64 = cost_str.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                        let inp: i64 = row.get(2).unwrap_or(0);
-                        let out: i64 = row.get(3).unwrap_or(0);
-                        let cache: i64 = row.get(4).unwrap_or(0);
-                        let m: String = row.get(5).unwrap_or_default();
-                        let cw: i64 = row.get(6).unwrap_or(0);
+                        let inp: i64 = row.get(3).unwrap_or(0);
+                        let out: i64 = row.get(4).unwrap_or(0);
+                        let cache: i64 = row.get(5).unwrap_or(0);
+                        let m: String = row.get(6).unwrap_or_default();
+                        let cw: i64 = row.get(7).unwrap_or(0);
                         let cost = config.effective_cost(&m, cost, Usage { input: inp, output: out, cache_read: cache, cache_write: cw });
-                        Ok((ts, cost, inp + out + cache))
+                        Ok((app_type, ts, cost, inp + out + cache + cw))
                     }) {
-                        for r in rows.flatten() {
-                            let (ts, cost, tokens) = r;
+                        for (app_type, ts, cost, tokens) in rows.flatten() {
+                            if !tool_visible(&app_type) {
+                                continue;
+                            }
                             if let Some(dt) = Local.timestamp_opt(ts, 0).single() {
                                 let d = dt.date_naive();
+                                if !rollup_dates.is_empty() && rollup_dates.contains(&d.format("%Y-%m-%d").to_string()) {
+                                    continue;
+                                }
                                 let entry = day_map.entry(d).or_insert_with(|| DaySummary { date: d, ..Default::default() });
                                 entry.total_cost_usd += cost;
                                 entry.total_tokens += tokens;
@@ -431,9 +718,27 @@ impl RangeStatsCalculator {
                 }
             }
         } else {
-            // 原生扫描数据 (或内存增量)
+            let today_str = Local::now().format("%Y-%m-%d").to_string();
+            for item in collector.native_scanner.daily_archive.entries.values() {
+                if item.date.starts_with(&month_prefix) && item.date < today_str && tool_visible(&item.app_type) {
+                    if let Ok(d) = NaiveDate::parse_from_str(&item.date, "%Y-%m-%d") {
+                        let u = Usage {
+                            input: item.input_tokens,
+                            output: item.output_tokens,
+                            cache_read: item.cache_read_tokens,
+                            cache_write: item.cache_creation_tokens,
+                        };
+                        let cost = config.effective_cost(&item.model, 0.0, u);
+                        let entry = day_map.entry(d).or_insert_with(|| DaySummary { date: d, ..Default::default() });
+                        entry.total_cost_usd += cost;
+                        entry.total_tokens += u.input + u.output + u.cache_read + u.cache_write;
+                        entry.request_count += item.request_count;
+                    }
+                }
+            }
+
             for r in &collector.records {
-                if r.created_at >= start_ts && r.created_at <= end_ts {
+                if r.created_at >= start_ts && r.created_at <= end_ts && tool_visible(&r.app_type) {
                     if let Some(dt) = Local.timestamp_opt(r.created_at, 0).single() {
                         let d = dt.date_naive();
                         let cost = config.effective_cost(&r.model, r.total_cost_usd, r.usage());
@@ -602,6 +907,59 @@ impl CalendarViewerState {
             self.current_month,
         );
     }
+
+    /// 导出带 UTF-8 BOM 的完整 CSV 账单文件 (Excel 双击直开不乱码)
+    pub fn export_range_csv(&self, config: &HudConfig) -> String {
+        let mut out = String::from("\u{FEFF}");
+        out.push_str("Model,RawID,InputTokens,OutputTokens,CacheReadTokens,CacheWriteTokens,TotalTokens,CostUSD,CostCNY,CacheSavedUSD,Requests\n");
+        if let Some(s) = &self.summary {
+            for m in &s.models {
+                let esc_disp = m.display_name.replace('"', "\"\"");
+                let esc_raw = m.model.replace('"', "\"\"");
+                out.push_str(&format!(
+                    "\"{}\",\"{}\",{},{},{},{},{},{:.4},{:.4},{:.4},{}\n",
+                    esc_disp,
+                    esc_raw,
+                    m.input_tokens,
+                    m.output_tokens,
+                    m.cache_read_tokens,
+                    m.cache_creation_tokens,
+                    m.total_tokens,
+                    m.total_cost_usd,
+                    m.total_cost_usd * config.usd_to_cny_rate,
+                    m.cache_saved_usd,
+                    m.request_count
+                ));
+            }
+            out.push_str(&format!(
+                "\"Total\",\"ALL\",{},{},{},{},{},{:.4},{:.4},{:.4},{}\n",
+                s.total_input_tokens,
+                s.total_output_tokens,
+                s.total_cache_read_tokens,
+                s.total_cache_creation_tokens,
+                s.total_tokens,
+                s.total_cost_usd,
+                s.total_cost_usd * config.usd_to_cny_rate,
+                s.total_cache_saved_usd,
+                s.total_requests
+            ));
+        }
+
+        out.push_str("\nDate,CostUSD,CostCNY,TotalTokens,Requests\n");
+        let mut days: Vec<&DaySummary> = self.month_days.values().collect();
+        days.sort_by_key(|d| d.date);
+        for d in days {
+            out.push_str(&format!(
+                "{},{:.4},{:.4},{},{}\n",
+                d.date.format("%Y-%m-%d"),
+                d.total_cost_usd,
+                d.total_cost_usd * config.usd_to_cny_rate,
+                d.total_tokens,
+                d.request_count
+            ));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -645,5 +1003,67 @@ mod tests {
             println!("All range summary: {} models, total tokens: {}, total cost: ${:.2}", all_summary.models.len(), all_summary.total_tokens, all_summary.total_cost_usd);
             assert!(all_summary.total_cost_usd > 5000.0, "All-time cost should be > $5000");
         }
+    }
+
+    #[test]
+    fn test_query_range_breakdown_native_and_presets() {
+        let mut cfg = HudConfig::default();
+        cfg.driver_mode = "native".to_string();
+        cfg.visible_tools.insert("claude".to_string(), true);
+        cfg.visible_tools.insert("codex".to_string(), true);
+
+        let now = Local::now();
+        let today_start = crate::history_cache::local_start_of_today();
+        let yest_ts = today_start - 3600;
+        let today_ts = now.timestamp();
+
+        let mut collector = TokenCollector::default();
+        let rec_yest = crate::collector::TokenRecord {
+            request_id: "r-yest".into(),
+            session_id: "s-yest".into(),
+            app_type: "claude".into(),
+            model: "claude-opus-5-5".into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 1500,
+            total_cost_usd: 0.0,
+            latency_ms: 1500,
+            created_at: yest_ts,
+        };
+        let rec_today = crate::collector::TokenRecord {
+            request_id: "r-today".into(),
+            session_id: "s-today".into(),
+            app_type: "codex".into(),
+            model: "gpt-5.4".into(),
+            input_tokens: 2000,
+            output_tokens: 1000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 3000,
+            total_cost_usd: 0.0,
+            latency_ms: 1500,
+            created_at: today_ts,
+        };
+        collector.native_scanner.daily_archive.add_record(&rec_yest);
+        collector.native_scanner.daily_archive.add_record(&rec_today);
+        collector.records.push(rec_today);
+
+        let b_today = RangeStatsCalculator::query_range_breakdown(&collector, &cfg, RangePreset::Today, None, None);
+        assert_eq!(b_today.tools.len(), 1);
+        assert_eq!(b_today.tools[0].id, "codex");
+        assert_eq!(b_today.total_tokens, 3000);
+
+        let b_yest = RangeStatsCalculator::query_range_breakdown(&collector, &cfg, RangePreset::Yesterday, None, None);
+        assert_eq!(b_yest.tools.len(), 1);
+        assert_eq!(b_yest.tools[0].id, "claude");
+        assert_eq!(b_yest.total_tokens, 1500);
+
+        let b_all = RangeStatsCalculator::query_range_breakdown(&collector, &cfg, RangePreset::All, None, None);
+        assert_eq!(b_all.tools.len(), 2);
+        assert_eq!(b_all.models.len(), 2);
+        assert_eq!(b_all.total_tokens, 4500, "All preset should combine yesterday + today without double counting today");
+        assert_eq!(b_all.total_requests, 2);
     }
 }

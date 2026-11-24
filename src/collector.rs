@@ -2,13 +2,16 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OpenFlags};
 
+use serde::{Deserialize, Serialize};
+
 #[allow(dead_code)]
 pub const USD_TO_CNY: f64 = 7.25;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct TokenRecord {
     pub request_id: String,
+    pub session_id: String,
     pub app_type: String,
     pub model: String,
     pub input_tokens: i64,
@@ -114,34 +117,51 @@ impl TokenCollector {
         }
     }
 
-    /// 原生会话扫描模式同步：直接扫描 Claude, Antigravity, Codex 本地原生会话目录
+    /// 原生会话扫描模式同步：直接扫描 Claude, Antigravity, Codex, Copilot 本地原生会话目录
     pub fn sync_native(&mut self, config: &crate::config::HudConfig) -> usize {
         let current_today_start = crate::history_cache::local_start_of_today();
         if current_today_start > self.today_start {
             self.today_start = current_today_start;
             self.records.retain(|r| r.created_at >= current_today_start);
             self.last_sync_timestamp = current_today_start - 1;
+            self.native_scanner.prune_today_cache(current_today_start);
+        }
+
+        // 启动恢复或切回原生模式时，从持久化今日缓存还原已完成扫描的今日记录，防止游标到 EOF 后丢失今日数据
+        if self.records.is_empty() {
+            let cached = self.native_scanner.cached_today_records(self.today_start);
+            if !cached.is_empty() {
+                for rec in cached {
+                    if rec.created_at > self.last_sync_timestamp {
+                        self.last_sync_timestamp = rec.created_at;
+                    }
+                    self.records.push(rec);
+                }
+            }
         }
 
         let new_records = self.native_scanner.scan_incremental(config, self.today_start);
         let count = new_records.len();
         if count > 0 {
-            let mut latest_speed = 0.0;
-            let mut latest_speed_ts = 0.0;
             for rec in new_records {
-                let speed = Self::request_speed(rec.output_tokens, rec.latency_ms).unwrap_or(0.0);
-                if speed > 0.0 {
-                    latest_speed = speed;
-                    latest_speed_ts = rec.created_at as f64;
-                }
                 if rec.created_at > self.last_sync_timestamp {
                     self.last_sync_timestamp = rec.created_at;
                 }
                 self.records.push(rec);
             }
-            if latest_speed > 0.0 {
-                self.current_speed = latest_speed;
-                self.last_speed_update = latest_speed_ts;
+        }
+
+        // 按时间戳排序，确保按时间顺序倒序拾取最新有效速率且 Live Stream 时间有序
+        self.records.sort_by_key(|r| r.created_at);
+        if let Some((spd, ts)) = self
+            .records
+            .iter()
+            .rev()
+            .find_map(|r| Self::request_speed(r.output_tokens, r.latency_ms).map(|s| (s, r.created_at as f64)))
+        {
+            if ts >= self.last_speed_update || self.current_speed <= 0.0 {
+                self.current_speed = spd;
+                self.last_speed_update = ts;
             }
         }
         count
@@ -172,7 +192,8 @@ impl TokenCollector {
             let (query, param): (&str, i64) = if is_first_sync {
                 (
                     "SELECT rowid, request_id, app_type, model, input_tokens, output_tokens,
-                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens
+                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens,
+                            COALESCE(session_id, '')
                      FROM proxy_request_logs
                      WHERE created_at >= ?
                      ORDER BY rowid ASC",
@@ -181,7 +202,8 @@ impl TokenCollector {
             } else {
                 (
                     "SELECT rowid, request_id, app_type, model, input_tokens, output_tokens,
-                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens
+                            cache_read_tokens, total_cost_usd, latency_ms, created_at, cache_creation_tokens,
+                            COALESCE(session_id, '')
                      FROM proxy_request_logs
                      WHERE rowid > ?
                      ORDER BY rowid ASC",
@@ -197,21 +219,24 @@ impl TokenCollector {
                     let input_tok: i64 = row.get(4).unwrap_or(0);
                     let output_tok: i64 = row.get(5).unwrap_or(0);
                     let cache_tok: i64 = row.get(6).unwrap_or(0);
-                    let total_tok = input_tok + output_tok + cache_tok;
+                    let cw_tok: i64 = row.get(10).unwrap_or(0);
+                    let total_tok = input_tok + output_tok + cache_tok + cw_tok;
 
                     let raw_app: String = row.get::<_, String>(2).unwrap_or_else(|_| "custom".into());
                     let app_type = Self::normalize_app_type(&raw_app);
+                    let session_id: String = row.get(11).unwrap_or_default();
 
                     Ok((
                         rowid,
                         TokenRecord {
                             request_id: row.get(1).unwrap_or_default(),
+                            session_id,
                             app_type,
                             model: row.get::<_, String>(3).unwrap_or_else(|_| "unknown".into()),
                             input_tokens: input_tok,
                             output_tokens: output_tok,
                             cache_read_tokens: cache_tok,
-                            cache_creation_tokens: row.get(10).unwrap_or(0),
+                            cache_creation_tokens: cw_tok,
                             total_tokens: total_tok,
                             total_cost_usd: cost,
                             latency_ms: row.get(8).unwrap_or(0),
@@ -308,5 +333,62 @@ mod tests {
         // Verify speed stays constant without decay
         let speed_after = collector.get_realtime_speed();
         assert_eq!(speed, speed_after, "Speed should hold steady until next request arrives");
+    }
+
+    #[test]
+    fn test_sync_native_picks_latest_chronological_speed() {
+        let mut cfg = crate::config::HudConfig::default();
+        cfg.driver_mode = "native".to_string();
+
+        let mut collector = TokenCollector::default();
+        let today_start = crate::history_cache::local_start_of_today();
+        collector.today_start = today_start;
+        let ts_base = today_start + 200_000;
+        // Intentionally insert newer timestamp BEFORE older timestamp (simulating unsorted dir walk)
+        collector.native_scanner.today_cache.records.push(TokenRecord {
+            request_id: "new".into(),
+            session_id: "s-new".into(),
+            app_type: "agy".into(),
+            model: "gemini-4-neon".into(),
+            input_tokens: 100,
+            output_tokens: 1000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 1100,
+            total_cost_usd: 0.0,
+            latency_ms: 10_000, // 100 T/s
+            created_at: ts_base + 2000,
+        });
+        collector.native_scanner.today_cache.records.push(TokenRecord {
+            request_id: "old".into(),
+            session_id: "s-old".into(),
+            app_type: "claude".into(),
+            model: "claude-opus-5-5".into(),
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 300,
+            total_cost_usd: 0.0,
+            latency_ms: 10_000, // 20 T/s
+            created_at: ts_base + 1000,
+        });
+        collector.native_scanner.today_cache.records.push(TokenRecord {
+            request_id: "newest-zero-lat".into(),
+            session_id: "s-new".into(),
+            app_type: "agy".into(),
+            model: "gemini-4-neon".into(),
+            input_tokens: 100,
+            output_tokens: 100,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 200,
+            total_cost_usd: 0.0,
+            latency_ms: 0, // zero latency should be skipped for speed
+            created_at: ts_base + 3000,
+        });
+
+        let _ = collector.sync_native(&cfg);
+        assert_eq!(collector.get_realtime_speed(), 100, "Should pick chronologically newest non-zero speed (100 T/s)");
     }
 }

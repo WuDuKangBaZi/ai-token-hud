@@ -35,16 +35,36 @@ impl DbWatcher {
                 watch_dirs.push((claude_dir, true));
             }
 
-            // 3. 原生 Antigravity 会话目录
+            // 3. 原生 Antigravity 会话目录 (包含桌面与 CLI)
             let agy_dir = home.join(".gemini").join("antigravity").join("brain");
             if agy_dir.exists() {
                 watch_dirs.push((agy_dir, true));
+            }
+            let agy_cli_dir = home.join(".gemini").join("antigravity-cli").join("brain");
+            if agy_cli_dir.exists() {
+                watch_dirs.push((agy_cli_dir, true));
             }
 
             // 4. 原生 Codex 会话目录
             let codex_dir = home.join(".codex").join("sessions");
             if codex_dir.exists() {
                 watch_dirs.push((codex_dir, true));
+            }
+
+            // 5. GitHub Copilot 原生会话目录
+            let copilot_dir = home.join(".copilot").join("session-state");
+            if copilot_dir.exists() {
+                watch_dirs.push((copilot_dir, true));
+            }
+
+            // 6. OpenCode 本地会话目录
+            for oc_dir in [
+                home.join(".local").join("share").join("opencode"),
+                home.join(".opencode"),
+            ] {
+                if oc_dir.exists() {
+                    watch_dirs.push((oc_dir, true));
+                }
             }
         }
 
@@ -56,6 +76,8 @@ impl DbWatcher {
                         name.starts_with("cc-switch.db")
                             || name.ends_with(".jsonl")
                             || name.ends_with(".zst")
+                            || name.ends_with(".json")
+                            || name.ends_with(".yaml")
                     });
 
                     if has_valid_file {

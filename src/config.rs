@@ -54,6 +54,56 @@ fn default_driver_mode() -> String {
     "auto".to_string()
 }
 
+fn default_language() -> String {
+    "zh".to_string()
+}
+
+fn default_ui_theme() -> String {
+    "glass".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_dock_position() -> String {
+    "top_center".to_string()
+}
+
+fn default_flyout_height() -> f32 {
+    330.0
+}
+
+fn default_total_scope() -> String {
+    "all".to_string()
+}
+
+/// 为浮点数整数部分添加千分位逗号 (例如 41995.42 -> "41,995.42")
+pub fn format_number_commas(val: f64, decimals: usize) -> String {
+    let sign = if val < 0.0 { "-" } else { "" };
+    let abs_val = val.abs();
+    let formatted = format!("{:.*}", decimals, abs_val);
+    let (int_part, frac_part) = match formatted.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (formatted.as_str(), None),
+    };
+    let mut int_with_commas = String::with_capacity(int_part.len() + int_part.len() / 3);
+    for (idx, ch) in int_part.chars().enumerate() {
+        if idx > 0 && (int_part.len() - idx) % 3 == 0 {
+            int_with_commas.push(',');
+        }
+        int_with_commas.push(ch);
+    }
+    match frac_part {
+        Some(f) => format!("{}{}.{}", sign, int_with_commas, f),
+        None => format!("{}{}", sign, int_with_commas),
+    }
+}
+
+pub fn format_int_commas(val: i64) -> String {
+    format_number_commas(val as f64, 0)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HudConfig {
     pub view_mode: String, // "tool" | "model" | "cost"
@@ -80,12 +130,51 @@ pub struct HudConfig {
     /// 数据源模式: "auto" (智能探测: 有 CC Switch 则优先，否则原生扫描), "ccswitch" (强制 CC Switch), "native" (强制原生扫描)
     #[serde(default = "default_driver_mode")]
     pub driver_mode: String,
+    /// 界面语言: "zh" (简体中文) | "en" (English)
+    #[serde(default = "default_language")]
+    pub language: String,
     /// 每日预算 (美元，0 表示不启用)，HUD 横条按今日消耗占比着色并绘制进度线
     #[serde(default)]
     pub daily_budget_usd: f64,
     /// 上次退出时 HUD 横条的屏幕位置 (逻辑像素)，启动时恢复
     #[serde(default)]
     pub hud_pos: Option<[f32; 2]>,
+    /// 视觉主题风格: "glass" (极客暗色玻璃) | "cyber" (硬核遥测监视器)
+    #[serde(default = "default_ui_theme")]
+    pub ui_theme: String,
+    /// 是否启用 Windows 11 原生 DWM 背景模糊与圆角特效
+    #[serde(default = "default_true")]
+    pub backdrop_blur: bool,
+    /// 是否开启 HUD 鼠标点击穿透模式 (WS_EX_TRANSPARENT)
+    #[serde(default)]
+    pub click_through: bool,
+    /// 是否在 HUD 横条内绘制实时输出速率迷你波形图 (Sparkline)
+    #[serde(default = "default_true")]
+    pub show_sparkline: bool,
+    /// 是否在 HUD 横条上同时内联展示双币种括号金额
+    #[serde(default)]
+    pub hud_dual_currency: bool,
+    /// 每月预算 (美元，0 表示不启用)
+    #[serde(default)]
+    pub monthly_budget_usd: f64,
+    /// 单次高额请求提醒阈值 (美元，0 表示不启用)
+    #[serde(default)]
+    pub spike_alert_usd: f64,
+    /// 是否启用全局快捷键 (Ctrl+Alt+H/T/F)
+    #[serde(default = "default_true")]
+    pub global_hotkeys_enabled: bool,
+    /// 拖拽停止时是否自动吸附到屏幕工作区边缘
+    #[serde(default = "default_true")]
+    pub edge_snap: bool,
+    /// 停靠预设位置: "top_left" | "top_center" | "top_right" | "bottom_left" | "bottom_right" | "custom"
+    #[serde(default = "default_dock_position")]
+    pub dock_position: String,
+    /// 展开面板内容区自定义高度 (逻辑像素 200..=720)
+    #[serde(default = "default_flyout_height")]
+    pub flyout_height: f32,
+    /// HUD 横条 TOTAL 汇总显示周期: "week" | "month" | "all"
+    #[serde(default = "default_total_scope")]
+    pub total_scope: String,
     pub visible_tools: HashMap<String, bool>,
     pub custom_pricing: HashMap<String, ModelPrice>,
 }
@@ -110,8 +199,21 @@ impl Default for HudConfig {
             auto_fetch_pricing: true,
             last_pricing_fetch_time: None,
             driver_mode: "auto".to_string(),
+            language: "zh".to_string(),
             daily_budget_usd: 0.0,
             hud_pos: None,
+            ui_theme: "glass".to_string(),
+            backdrop_blur: true,
+            click_through: false,
+            show_sparkline: true,
+            hud_dual_currency: false,
+            monthly_budget_usd: 0.0,
+            spike_alert_usd: 0.0,
+            global_hotkeys_enabled: true,
+            edge_snap: true,
+            dock_position: default_dock_position(),
+            flyout_height: default_flyout_height(),
+            total_scope: default_total_scope(),
             visible_tools,
             custom_pricing: HashMap::new(),
         }
@@ -143,21 +245,63 @@ impl HudConfig {
         self.currency == "CNY"
     }
 
-    /// 格式化主金额 (根据币种及配置汇率自动折算)
+    pub fn lang(&self) -> crate::i18n::Lang {
+        crate::i18n::Lang::from_code(&self.language)
+    }
+
+    pub fn resolved_dock_position(&self) -> &str {
+        match self.dock_position.as_str() {
+            "top_left" | "top_center" | "top_right" | "bottom_left" | "bottom_right" | "custom" => {
+                self.dock_position.as_str()
+            }
+            _ => "top_center",
+        }
+    }
+
+    pub fn resolved_total_scope(&self) -> &str {
+        match self.total_scope.as_str() {
+            "week" | "month" | "all" => self.total_scope.as_str(),
+            _ => "all",
+        }
+    }
+
+    pub fn clamped_flyout_height(&self) -> f32 {
+        self.flyout_height.clamp(200.0, 720.0)
+    }
+
+    /// 格式化主金额 (根据币种及配置汇率自动折算，自动支持千分位分隔)
     pub fn format_cost(&self, usd: f64) -> String {
         if self.is_cny() {
-            format!("¥{:.2}", usd * self.usd_to_cny_rate)
+            format!("¥{}", format_number_commas(usd * self.usd_to_cny_rate, 2))
         } else {
-            format!("${:.2}", usd)
+            format!("${}", format_number_commas(usd, 2))
         }
     }
 
     /// 格式化副金额 (在括号中展示另一币种及配置汇率折算)
     pub fn format_secondary_cost(&self, usd: f64) -> String {
         if self.is_cny() {
-            format!("(${:.2})", usd)
+            format!("(${})", format_number_commas(usd, 2))
         } else {
-            format!("(¥{:.1})", usd * self.usd_to_cny_rate)
+            format!("(¥{})", format_number_commas(usd * self.usd_to_cny_rate, 1))
+        }
+    }
+
+    /// 格式化日历格子/图表紧凑金额 (跟随当前主币种 USD/CNY)
+    pub fn format_cost_compact(&self, usd: f64) -> String {
+        let (sym, v) = if self.is_cny() {
+            ("¥", usd * self.usd_to_cny_rate)
+        } else {
+            ("$", usd)
+        };
+        if v >= 10_000.0 {
+            format!("{}{:.1}w", sym, v / 10_000.0)
+        } else if v >= 1_000.0 {
+            format!("{}{:.1}k", sym, v / 1_000.0)
+        } else if v >= 100.0 {
+            format!("{}{:.0}", sym, v)
+        } else {
+            format!("{}{:.1}", sym, v)
         }
     }
 
@@ -208,6 +352,41 @@ impl HudConfig {
             Some(today_usd / self.daily_budget_usd)
         } else {
             None
+        }
+    }
+
+    /// 本月消耗占每月预算的比例 (未启用月度预算时为 None)
+    pub fn monthly_budget_ratio(&self, month_usd: f64) -> Option<f64> {
+        if self.monthly_budget_usd > 0.0 {
+            Some(month_usd / self.monthly_budget_usd)
+        } else {
+            None
+        }
+    }
+
+    /// 判断某条记录的模型是否处于未收录单价（且数据源也未给出金额）的状态
+    pub fn is_unpriced(&self, model: &str, recorded_usd: f64) -> bool {
+        recorded_usd <= 0.0
+            && self.get_custom_price_if_any(model).is_none()
+            && Self::official_price_exact(model).is_none()
+    }
+
+    /// 计算 Prompt 缓存读取相较于标准输入节省的金额 (USD)
+    pub fn cache_savings_usd(&self, model: &str, cache_read_tokens: i64) -> f64 {
+        if cache_read_tokens <= 0 {
+            return 0.0;
+        }
+        let p = self.get_model_price(model);
+        let diff = (p.input - p.cache_read).max(0.0);
+        (cache_read_tokens as f64) * diff / 1_000_000.0
+    }
+
+    /// 新增或更新自定义模型单价 (自动归一化模型 ID 并落盘)
+    pub fn add_or_update_custom_price(&mut self, raw_id: &str, price: ModelPrice) {
+        let key = crate::pricing_catalog::normalize_model_id(raw_id);
+        if !key.is_empty() {
+            self.custom_pricing.insert(key, price);
+            self.save();
         }
     }
 
@@ -655,6 +834,7 @@ mod tests {
         assert!(cfg.auto_fetch_rate);
         assert!(cfg.auto_fetch_pricing);
         assert!(cfg.last_pricing_fetch_time.is_none());
+        assert_eq!(cfg.language, "zh");
         assert_eq!(cfg.daily_budget_usd, 0.0);
         assert!(cfg.hud_pos.is_none());
     }
@@ -731,6 +911,39 @@ mod tests {
         cfg.daily_budget_usd = 20.0;
         assert_eq!(cfg.budget_ratio(5.0), Some(0.25));
         assert_eq!(cfg.budget_ratio(30.0), Some(1.5));
+
+        assert!(cfg.monthly_budget_ratio(100.0).is_none());
+        cfg.monthly_budget_usd = 200.0;
+        assert_eq!(cfg.monthly_budget_ratio(50.0), Some(0.25));
+    }
+
+    #[test]
+    fn test_cache_savings_unpriced_and_new_fields_compat() {
+        let cfg = HudConfig::default();
+        // claude-fable-5-2: input=8.0, cache_read=0.2 -> diff 7.8 per 1M
+        let saved = cfg.cache_savings_usd("claude-fable-5-2", 1_000_000);
+        assert!((saved - 7.8).abs() < 1e-9);
+        assert_eq!(cfg.cache_savings_usd("claude-fable-5-2", 0), 0.0);
+
+        assert!(cfg.is_unpriced("unknown-private-model-v9", 0.0));
+        assert!(!cfg.is_unpriced("unknown-private-model-v9", 0.12));
+        assert!(!cfg.is_unpriced("claude-fable-5-2", 0.0));
+
+        let legacy_json = r#"{"view_mode":"cost","opacity":0.9,"always_on_top":true,"mini_mode":false,"visible_tools":{},"custom_pricing":{}}"#;
+        let parsed: HudConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.monthly_budget_usd, 0.0);
+        assert_eq!(parsed.spike_alert_usd, 0.0);
+        assert!(parsed.global_hotkeys_enabled);
+        assert!(parsed.edge_snap);
+        assert_eq!(parsed.resolved_dock_position(), "top_center");
+        assert_eq!(parsed.resolved_total_scope(), "all");
+        assert!((parsed.clamped_flyout_height() - 330.0).abs() < 1e-6);
+
+        let mut custom = parsed.clone();
+        custom.flyout_height = 999.0;
+        assert_eq!(custom.clamped_flyout_height(), 720.0);
+        custom.flyout_height = 50.0;
+        assert_eq!(custom.clamped_flyout_height(), 200.0);
     }
 
     #[test]

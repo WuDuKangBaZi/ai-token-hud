@@ -34,3 +34,7 @@ config.local.json
 # Added by cargo
 
 /target
+
+# 本地 Agent 技能与打包产物
+.agent/
+ai-token-hud-*.zip
