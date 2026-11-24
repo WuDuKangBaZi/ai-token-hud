@@ -249,8 +249,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                             .on_hover_text(lang.tr("收起到右下角系统托盘", "Minimize to System Tray"))
                             .clicked()
                         {
-                            crate::tray::hide_hud();
-                            crate::win_fx::trim_working_set();
+                            app.minimize_to_tray();
                         }
 
                         // 5. 退出按钮 (悬浮鲜红底色)
@@ -267,7 +266,7 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         .on_hover_text(lang.tr("退出 AI Token HUD", "Quit AI Token HUD"))
                         .clicked()
                         {
-                            std::process::exit(0);
+                            app.quit_gracefully();
                         }
                     }
                 });

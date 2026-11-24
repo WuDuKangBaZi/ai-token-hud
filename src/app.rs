@@ -468,6 +468,17 @@ impl TokenHudApp {
         );
     }
 
+    pub fn minimize_to_tray(&mut self) {
+        self.collector.flush_native_cache();
+        crate::tray::hide_hud();
+        crate::win_fx::trim_working_set();
+    }
+
+    pub fn quit_gracefully(&mut self) {
+        self.collector.flush_native_cache();
+        std::process::exit(0);
+    }
+
     pub fn set_view_mode(&mut self, mode: &str) {
         if self.config.view_mode != mode {
             self.config.view_mode = mode.to_string();
@@ -696,6 +707,10 @@ impl eframe::App for TokenHudApp {
         }
         self.ui(ctx);
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.collector.flush_native_cache();
+    }
 }
 
 impl TokenHudApp {
@@ -722,6 +737,9 @@ impl TokenHudApp {
                 ThemeKind::Cyber => ThemeKind::Glass,
             };
             self.set_theme(next, ctx);
+        }
+        if crate::tray::QUIT_APP_FLAG.swap(false, Ordering::SeqCst) {
+            self.quit_gracefully();
         }
         if crate::hotkeys::TOGGLE_FLYOUT_FLAG.swap(false, Ordering::SeqCst) {
             self.flyout_pinned = !self.flyout_pinned;
@@ -841,12 +859,15 @@ impl TokenHudApp {
             }
         }
 
-        // 4. 文件写入事件驱动增量同步 (ReadDirectoryChangesW + 30s 跨日兜底)
+        // 4. 文件写入事件驱动增量同步 (ReadDirectoryChangesW 生效时零空闲轮询，仅在事件触发或跨零点时同步)
+        let watcher_active = self.db_watcher.as_ref().is_some_and(|w| w.is_watching());
         let file_event_triggered = self.db_watcher.as_ref().is_some_and(|w| w.take_change());
-        let fallback_check = self.last_sync.elapsed().as_secs() >= 30;
-        if file_event_triggered || fallback_check {
-            let today_start = crate::history_cache::local_start_of_today();
-            if today_start > self.collector.today_start {
+        let today_start = crate::history_cache::local_start_of_today();
+        let crossed_midnight = today_start > self.collector.today_start;
+        let fallback_poll = !watcher_active && self.last_sync.elapsed().as_secs() >= 30;
+        if file_event_triggered || crossed_midnight || fallback_poll {
+            if crossed_midnight {
+                self.collector.flush_native_cache();
                 self.history_cache.sync_historical_if_needed(&self.collector.db_path, &self.config);
             }
             if self.collector.sync(&self.config) > 0 {
@@ -856,6 +877,8 @@ impl TokenHudApp {
             }
             self.last_sync = Instant::now();
         }
+        // 节流刷盘：距离上次写入 >= 10s 时仅落盘发生变更的缓存文件
+        self.collector.native_scanner.flush_if_due();
 
         // 5. 空闲内存自动修剪
         if self.cached_speed > 0 || self.cost_dropdown_open || self.show_settings_window || self.show_context_menu {

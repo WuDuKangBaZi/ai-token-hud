@@ -733,6 +733,7 @@ fn render_drivers_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &ThemeTokens
         });
 
         if mode_changed {
+            app.collector.flush_native_cache();
             app.config.save();
             app.collector.records.clear();
             app.collector.last_sync_rowid = 0;

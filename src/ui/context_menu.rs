@@ -156,15 +156,14 @@ pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &Theme
 
                     if menu_row(ui, Icon::Minimize, lang.tr("收起到右下角系统托盘", "Minimize to System Tray"), t.text_secondary, t).clicked() {
                         app.show_context_menu = false;
-                        crate::tray::hide_hud();
-                        crate::win_fx::trim_working_set();
+                        app.minimize_to_tray();
                     }
 
                     ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
 
                     if menu_row(ui, Icon::Close, lang.tr("关闭退出 AI Token HUD", "Quit AI Token HUD"), t.danger, t).clicked() {
                         app.show_context_menu = false;
-                        std::process::exit(0);
+                        app.quit_gracefully();
                     }
                 });
         });

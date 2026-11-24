@@ -18,6 +18,8 @@ pub static RESET_POSITION_FLAG: AtomicBool = AtomicBool::new(false);
 pub static TOGGLE_CLICK_THROUGH_FLAG: AtomicBool = AtomicBool::new(false);
 /// 托盘菜单请求一键切换双视觉主题 (Glass <-> Cyber)
 pub static TOGGLE_THEME_FLAG: AtomicBool = AtomicBool::new(false);
+/// 托盘菜单请求退出程序（通知主循环先行落盘缓存后退出）
+pub static QUIT_APP_FLAG: AtomicBool = AtomicBool::new(false);
 
 pub fn find_hud_hwnd() -> HWND {
     let title: Vec<u16> = OsStr::new("AI Token HUD Bar")
@@ -233,7 +235,7 @@ impl SystemTray {
 
         tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
             if event.id == quit_id {
-                std::process::exit(0);
+                QUIT_APP_FLAG.store(true, Ordering::SeqCst);
             } else if event.id == show_id {
                 toggle_hud_visibility();
             } else if event.id == ct_id {

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,6 +11,7 @@ use crate::collector::TokenRecord;
 use crate::config::{HudConfig, Usage};
 
 const NATIVE_SCAN_REV: u32 = 3;
+const NATIVE_FLUSH_INTERVAL_SECS: u64 = 10;
 
 /// 单个会话文件的增量解析游标 (支持字节偏移断点续读与累计字段精确求差)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -205,6 +207,10 @@ pub struct NativeScanner {
     pub today_cache: NativeTodayCache,
     #[allow(dead_code)]
     pub cache_file: PathBuf,
+    pub(crate) cursors_dirty: bool,
+    pub(crate) archive_dirty: bool,
+    pub(crate) today_dirty: bool,
+    last_flush: Option<Instant>,
 }
 
 impl Default for NativeScanner {
@@ -253,6 +259,10 @@ impl NativeScanner {
             daily_archive,
             today_cache,
             cache_file,
+            cursors_dirty: false,
+            archive_dirty: false,
+            today_dirty: false,
+            last_flush: None,
         }
     }
 
@@ -275,21 +285,54 @@ impl NativeScanner {
         if self.today_cache.today_start != today_start || self.today_cache.records.len() != before {
             self.today_cache.today_start = today_start;
             self.today_cache.save();
+            self.today_dirty = false;
         }
     }
 
-    pub fn save(&self) {
-        if cfg!(test) {
+    pub fn has_pending_writes(&self) -> bool {
+        self.cursors_dirty || self.archive_dirty || self.today_dirty
+    }
+
+    /// 仅按脏标记落盘发生变化的缓存文件，避免无谓整包覆写
+    pub fn flush_if_dirty(&mut self) {
+        if !self.has_pending_writes() {
             return;
         }
-        if let Some(parent) = self.cache_file.parent() {
-            let _ = fs::create_dir_all(parent);
+        if !cfg!(test) {
+            if self.cursors_dirty {
+                if let Some(parent) = self.cache_file.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Ok(content) = serde_json::to_string(&self.state) {
+                    let _ = fs::write(&self.cache_file, content);
+                }
+            }
+            if self.archive_dirty {
+                self.daily_archive.save();
+            }
+            if self.today_dirty {
+                self.today_cache.records.sort_by_key(|r| r.created_at);
+                self.today_cache.save();
+            }
         }
-        if let Ok(content) = serde_json::to_string(&self.state) {
-            let _ = fs::write(&self.cache_file, content);
+        self.cursors_dirty = false;
+        self.archive_dirty = false;
+        self.today_dirty = false;
+        self.last_flush = Some(Instant::now());
+    }
+
+    /// 节流刷盘：首次启动立即落盘，此后每 10 秒合并落盘一次
+    pub fn flush_if_due(&mut self) {
+        if !self.has_pending_writes() {
+            return;
         }
-        self.daily_archive.save();
-        self.today_cache.save();
+        let due = match self.last_flush {
+            None => true,
+            Some(t) => t.elapsed().as_secs() >= NATIVE_FLUSH_INTERVAL_SECS,
+        };
+        if due {
+            self.flush_if_dirty();
+        }
     }
 
     /// 扫描所有支持的本地原生会话日志并生成今日增量 TokenRecord，同时把所有已扫描记录归档到 NativeDailyArchive
@@ -303,10 +346,13 @@ impl NativeScanner {
         self.scan_codex_sessions(config, today_start, &mut records, &mut cursor_dirty, &mut archive_dirty);
         self.scan_copilot_sessions(config, today_start, &mut records, &mut cursor_dirty, &mut archive_dirty);
 
-        if cursor_dirty || archive_dirty || !records.is_empty() {
+        self.cursors_dirty |= cursor_dirty;
+        self.archive_dirty |= archive_dirty;
+        if !records.is_empty() && today_start > 0 {
+            self.today_dirty = true;
             self.today_cache.records.sort_by_key(|r| r.created_at);
-            self.save();
         }
+        self.flush_if_due();
 
         records.sort_by_key(|r| r.created_at);
         records
@@ -1416,6 +1462,42 @@ mod tests {
         assert_eq!(recs2.len(), 1);
         assert_eq!(recs2[0].session_id, uuid, "Incremental Codex scan should preserve cursor.last_session_id");
         assert_eq!(scanner.cached_today_records(today_start).len(), 2);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_native_scanner_per_file_dirty_and_throttle() {
+        let temp_dir = std::env::temp_dir().join(format!("ai_token_hud_dirty_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let file = temp_dir.join("transcript.jsonl");
+
+        // 仅写入无 Token 消耗的 USER_INPUT 行：应只触发 cursor_dirty，不触发 archive_dirty
+        fs::write(&file, "{\"type\":\"USER_INPUT\",\"created_at\":\"2026-11-24T10:00:00Z\",\"content\":\"hi\"}\n").unwrap();
+
+        let config = HudConfig::default();
+        let mut scanner = NativeScanner::new();
+        let mut records = Vec::new();
+        let mut cd = false;
+        let mut ad = false;
+        scanner.scan_single_antigravity_file(&file, "conv-d1", &config, 0, &mut records, &mut cd, &mut ad);
+        assert!(cd, "字节游标前进应置 cursor_dirty");
+        assert!(!ad, "无消费增量不得触发 archive_dirty");
+        assert!(records.is_empty());
+
+        // 首次 flush_if_due 应立即清理并记录 last_flush
+        scanner.cursors_dirty = cd;
+        scanner.archive_dirty = ad;
+        assert!(scanner.has_pending_writes());
+        scanner.flush_if_due();
+        assert!(!scanner.has_pending_writes(), "首次启动应立即落盘并清空脏标记");
+
+        // 10 秒窗口内再次脏化应暂存在内存而不立即落盘，直到显式调用 flush_if_dirty
+        scanner.cursors_dirty = true;
+        scanner.flush_if_due();
+        assert!(scanner.has_pending_writes(), "10 秒节流窗口内应合并等待下一次刷盘");
+        scanner.flush_if_dirty();
+        assert!(!scanner.has_pending_writes(), "显式刷盘应清空所有脏标记");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

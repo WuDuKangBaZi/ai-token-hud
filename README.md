@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v0.2.0-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.0)
+[![Release](https://img.shields.io/badge/Release-v0.2.1-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.1)
 ![Rust](https://img.shields.io/badge/Language-Rust-orange?style=flat-square&logo=rust)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=flat-square&logo=windows)
 ![GUI](https://img.shields.io/badge/GUI-eframe%20%2F%20egui-purple?style=flat-square)
@@ -12,9 +12,9 @@
 
 一条 38px 高的置顶 HUD 悬浮横条，内置 **Modern Glass（极客暗色玻璃）** 与 **Cyber OSD（硬核遥测监视器）** 双视觉主题。  
 实时监控 Claude Code、Codex、Antigravity、GitHub Copilot、Gemini 等 AI 编程工具的输出流速、当天花费、周期累计与缓存命中率。  
-基于 Windows `ReadDirectoryChangesW` 文件写入事件驱动刷新，空闲时 CPU 占用 0%，内存自动修剪至 ~15–30 MB。
+基于 Windows `ReadDirectoryChangesW` 文件写入事件驱动刷新，空闲时零轮询、0% CPU 占用与极低磁盘 I/O，内存自动修剪至 ~15–30 MB。
 
-[前往 GitHub Releases 下载 v0.2.0 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
+[前往 GitHub Releases 下载 v0.2.1 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
 
 </div>
 
@@ -48,6 +48,7 @@
   - 支持行内修改或手动新增自定义模型，变更后**纯内存回溯重算历史缓存与所有报表**；支持 USD / CNY 实时汇率同步与开机自动更新。
 - **原生与 CC Switch 双引擎驱动**：
   - 自动探测系统环境，支持智能切换或手动强制 **CC Switch SQLite** / **原生会话日志扫描**，并记忆多日原生历史（`native_daily.json` + `native_today.json`），跨零点与重启零数据丢失。
+  - **极低磁盘 I/O**：`ReadDirectoryChangesW` 活跃期间零空闲目录轮询；原生缓存采用分文件脏标记与 10 秒合并节流落盘，仅重写发生变化的文件（退出、最小化至托盘及跨零点自动立即刷盘）。
 
 ---
 

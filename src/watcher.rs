@@ -119,7 +119,6 @@ impl DbWatcher {
     }
 
     /// 当前是否处于操作系统文件事件常驻监听中
-    #[allow(dead_code)]
     pub fn is_watching(&self) -> bool {
         self._watcher.is_some()
     }
