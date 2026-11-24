@@ -551,10 +551,13 @@ impl StatsEngine {
 
         // 特殊旗舰与代号前置匹配
         if lower.contains("astra") {
+            if lower.contains("6.2") || lower.contains("6-2") {
+                return "GPT-6.2 Astra".to_string();
+            }
             return "GPT-6 Astra".to_string();
         }
 
-        // 2. Claude 系列 (Opus 5.5, Sonnet 3.7, Haiku 5.5, Fable 5 等)
+        // 2. Claude 系列 (Opus 5.5, Sonnet 4.6, Haiku 5.5, Fable 5.2 等)
         if lower.contains("claude") || lower.contains("opus") || lower.contains("sonnet") || lower.contains("haiku") || lower.contains("fable") {
             let family = if lower.contains("opus") {
                 "Opus"
@@ -574,30 +577,62 @@ impl StatsEngine {
                 " 5.1"
             } else if lower.contains("5-5") || lower.contains("5.5") {
                 " 5.5"
+            } else if lower.contains("4-8") || lower.contains("4.8") {
+                " 4.8"
+            } else if lower.contains("4-7") || lower.contains("4.7") {
+                " 4.7"
+            } else if lower.contains("4-6") || lower.contains("4.6") {
+                " 4.6"
+            } else if lower.contains("4-5") || lower.contains("4.5") {
+                " 4.5"
             } else if lower.contains("3-7") || lower.contains("3.7") {
                 " 3.7"
             } else if lower.contains("3-5") || lower.contains("3.5") {
                 " 3.5"
-            } else if lower.contains("3") {
-                " 3"
             } else if lower.contains("5") {
                 " 5"
+            } else if lower.contains("4") {
+                " 4"
+            } else if lower.contains("3") {
+                " 3"
             } else {
                 ""
             };
             return format!("{}{}", family, ver);
         }
 
-        // 3. Gemini 系列 (Gemini 3.8, Gemini 2.5, Gemini 2.0 等)
+        // 3. Gemini 系列 (Gemini 4 Neon/Carbon/Argon/Hydrogen, 3.8, 3.5, 2.5 等)
         if lower.contains("gemini") {
+            if lower.contains("4-neon") || lower.contains("4.neon") {
+                return "Gemini 4 Neon".to_string();
+            }
+            if lower.contains("4-carbon") || lower.contains("4.carbon") {
+                return "Gemini 4 Carbon".to_string();
+            }
+            if lower.contains("4-argon") || lower.contains("4.argon") {
+                return "Gemini 4 Argon".to_string();
+            }
+            if lower.contains("4-hydrogen") || lower.contains("4.hydrogen") {
+                return "Gemini 4 H".to_string();
+            }
             let ver = if lower.contains("3.8") || lower.contains("3-8") {
                 " 3.8"
+            } else if lower.contains("3.7") || lower.contains("3-7") {
+                " 3.7"
+            } else if lower.contains("3.6") || lower.contains("3-6") {
+                " 3.6"
+            } else if lower.contains("3.5") || lower.contains("3-5") {
+                " 3.5"
+            } else if lower.contains("3.1") || lower.contains("3-1") {
+                " 3.1"
             } else if lower.contains("2.5") || lower.contains("2-5") {
                 " 2.5"
             } else if lower.contains("2.0") || lower.contains("2-0") {
                 " 2.0"
             } else if lower.contains("1.5") || lower.contains("1-5") {
                 " 1.5"
+            } else if lower.contains("gemini-3") {
+                " 3"
             } else {
                 ""
             };
@@ -635,6 +670,7 @@ impl StatsEngine {
             return "o1".to_string();
         }
         if lower.starts_with("o3") {
+            if lower.contains("pro") { return "o3-pro".to_string(); }
             if lower.contains("mini") { return "o3-mini".to_string(); }
             return "o3".to_string();
         }
@@ -644,6 +680,12 @@ impl StatsEngine {
             if lower.contains("r1") || lower.contains("reasoner") {
                 return "DeepSeek R1".to_string();
             }
+            if lower.contains("v4.1") || lower.contains("v4-1") {
+                return "DeepSeek V4.1".to_string();
+            }
+            if lower.contains("v4") {
+                return "DeepSeek V4".to_string();
+            }
             if lower.contains("v3") || lower.contains("chat") {
                 return "DeepSeek V3".to_string();
             }
@@ -652,8 +694,23 @@ impl StatsEngine {
 
         // 7. Qwen 系列
         if lower.contains("qwen") {
+            if lower.contains("3.8") || lower.contains("3-8") {
+                return "Qwen 3.8".to_string();
+            }
+            if lower.contains("3.7") || lower.contains("3-7") {
+                return "Qwen 3.7".to_string();
+            }
+            if lower.contains("3.6") || lower.contains("3-6") {
+                return "Qwen 3.6".to_string();
+            }
+            if lower.contains("3.5") || lower.contains("3-5") {
+                return "Qwen 3.5".to_string();
+            }
             if lower.contains("2.5") || lower.contains("2-5") {
                 return "Qwen 2.5".to_string();
+            }
+            if lower.contains("qwen3") || lower.contains("qwen-3") {
+                return "Qwen 3".to_string();
             }
             if lower.contains("max") {
                 return "Qwen Max".to_string();
@@ -663,6 +720,12 @@ impl StatsEngine {
 
         // 8. xAI Grok
         if lower.contains("grok") {
+            if lower.contains("4.7") { return "Grok 4.7".to_string(); }
+            if lower.contains("4.6") { return "Grok 4.6".to_string(); }
+            if lower.contains("4.5") { return "Grok 4.5".to_string(); }
+            if lower.contains("4.3") { return "Grok 4.3".to_string(); }
+            if lower.contains("4.20") { return "Grok 4.20".to_string(); }
+            if lower.contains("4") { return "Grok 4".to_string(); }
             if lower.contains("3") {
                 return if lower.contains("mini") { "Grok 3 Mini".to_string() } else { "Grok 3".to_string() };
             }
@@ -683,21 +746,41 @@ impl StatsEngine {
 
         // 10. 智谱 GLM
         if lower.contains("glm") {
+            if lower.contains("5.3") || lower.contains("5-3") { return "GLM-5.3".to_string(); }
+            if lower.contains("5.2") || lower.contains("5-2") { return "GLM-5.2".to_string(); }
+            if lower.contains("5.1") || lower.contains("5-1") { return "GLM-5.1".to_string(); }
             if lower.contains("5") { return "GLM-5".to_string(); }
             if lower.contains("4.7") || lower.contains("4-7") { return "GLM-4.7".to_string(); }
+            if lower.contains("4.6") || lower.contains("4-6") { return "GLM-4.6".to_string(); }
+            if lower.contains("4.5") || lower.contains("4-5") { return "GLM-4.5".to_string(); }
             if lower.contains("air") { return "GLM-4 Air".to_string(); }
             if lower.contains("flash") { return "GLM-4 Flash".to_string(); }
             return "GLM-4".to_string();
         }
 
-        // 11. MiniMax 海螺
+        // 11. LG EXAONE
+        if lower.contains("exaone") {
+            if lower.contains("3.5") || lower.contains("3-5") { return "EXAONE 3.5".to_string(); }
+            if lower.contains("3") { return "EXAONE 3.0".to_string(); }
+            if lower.contains("2.5") || lower.contains("2-5") { return "EXAONE 2.5".to_string(); }
+            return "EXAONE 2.5".to_string();
+        }
+
+        // 12. MiniMax 海螺
         if lower.contains("minimax") {
             if lower.contains("flash") { return "MiniMax Flash".to_string(); }
             if lower.contains("m3") { return "MiniMax M3".to_string(); }
+            if lower.contains("m2.7") || lower.contains("m2-7") { return "MiniMax M2.7".to_string(); }
+            if lower.contains("m2.5") || lower.contains("m2-5") { return "MiniMax M2.5".to_string(); }
+            if lower.contains("m2.1") || lower.contains("m2-1") { return "MiniMax M2.1".to_string(); }
+            if lower.contains("m2") { return "MiniMax M2".to_string(); }
             return "MiniMax".to_string();
         }
 
-        // 12. 百度文心 / 腾讯混元 / 零一万物 / Meta Llama
+        // 13. 百度文心 / 腾讯混元 / 零一万物 / Meta Muse & Llama
+        if lower.contains("muse") {
+            return "Meta Muse".to_string();
+        }
         if lower.contains("ernie") {
             return if lower.contains("turbo") { "ERNIE Turbo".to_string() } else { "ERNIE 4.0".to_string() };
         }
@@ -761,5 +844,26 @@ mod tests {
             assert!(m.total_cost >= m.month_cost);
         }
         assert!(!period_costs.is_empty());
+    }
+
+    #[test]
+    fn test_short_model_name_opencode_models() {
+        assert_eq!(StatsEngine::short_model_name("k-exaone_v2.5"), "EXAONE 2.5");
+        assert_eq!(StatsEngine::short_model_name("k-exaone-2.5"), "EXAONE 2.5");
+        assert_eq!(StatsEngine::short_model_name("deepseek-v4.1-flash"), "DeepSeek V4.1");
+        assert_eq!(StatsEngine::short_model_name("GLM-5.3-Flash"), "GLM-5.3");
+        assert_eq!(StatsEngine::short_model_name("qwen3.6-plus"), "Qwen 3.6");
+        assert_eq!(StatsEngine::short_model_name("Qwen3.8-27B"), "Qwen 3.8");
+    }
+
+    #[test]
+    fn test_short_model_name_2026_models() {
+        assert_eq!(StatsEngine::short_model_name("gemini-4-neon"), "Gemini 4 Neon");
+        assert_eq!(StatsEngine::short_model_name("gemini-4-carbon"), "Gemini 4 Carbon");
+        assert_eq!(StatsEngine::short_model_name("openai/gpt-6.2-astra"), "GPT-6.2 Astra");
+        assert_eq!(StatsEngine::short_model_name("claude-sonnet-4-6"), "Sonnet 4.6");
+        assert_eq!(StatsEngine::short_model_name("grok-4.7"), "Grok 4.7");
+        assert_eq!(StatsEngine::short_model_name("MiniMax-M2.7"), "MiniMax M2.7");
+        assert_eq!(StatsEngine::short_model_name("muse-wonder-1.0"), "Meta Muse");
     }
 }

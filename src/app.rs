@@ -71,6 +71,11 @@ pub struct TokenHudApp {
     pub is_fetching_rate: bool,
     pub rate_tx: std::sync::mpsc::Sender<Result<f64, String>>,
     pub rate_rx: std::sync::mpsc::Receiver<Result<f64, String>>,
+    /// 在线模型列表同步状态
+    pub pricing_sync_status: Option<String>,
+    pub is_fetching_pricing: bool,
+    pub pricing_tx: std::sync::mpsc::Sender<Result<crate::pricing_catalog::OnlinePricingCatalog, String>>,
+    pub pricing_rx: std::sync::mpsc::Receiver<Result<crate::pricing_catalog::OnlinePricingCatalog, String>>,
     /// 是否已登记开机自启动 (以注册表 Run 项为准，不写入 config.json)
     pub autostart_enabled: bool,
     pub autostart_error: Option<String>,
@@ -110,11 +115,26 @@ impl TokenHudApp {
             });
         }
 
+        // 启动时按配置自动同步在线模型列表 (24 小时过期检查，避免每次重启重复下载)
+        if app.config.auto_fetch_pricing && crate::pricing_catalog::is_cache_stale(86_400) {
+            let tx = app.pricing_tx.clone();
+            let ctx_rep = ctx.clone();
+            app.is_fetching_pricing = true;
+            std::thread::spawn(move || {
+                let res = crate::pricing_catalog::fetch_online_pricing_catalog();
+                let _ = tx.send(res);
+                ctx_rep.request_repaint();
+            });
+        }
+
         app
     }
 
     pub fn new_headless() -> Self {
         let config = HudConfig::load();
+        if !cfg!(test) {
+            crate::pricing_catalog::load_cached_from_disk();
+        }
         let mut collector = TokenCollector::default();
         let mut history_cache = HistoryCache::load();
 
@@ -125,6 +145,7 @@ impl TokenHudApp {
         collector.sync(&config);
 
         let (rate_tx, rate_rx) = std::sync::mpsc::channel();
+        let (pricing_tx, pricing_rx) = std::sync::mpsc::channel();
         let mut calendar_state = crate::range_stats::CalendarViewerState::new();
         calendar_state.refresh(&collector, &config);
 
@@ -137,6 +158,10 @@ impl TokenHudApp {
             is_fetching_rate: false,
             rate_tx,
             rate_rx,
+            pricing_sync_status: None,
+            is_fetching_pricing: false,
+            pricing_tx,
+            pricing_rx,
             db_watcher: None,
             tray: None,
             is_hidden_to_tray: false,
@@ -842,6 +867,33 @@ impl TokenHudApp {
                 }
                 Err(e) => {
                     self.exchange_rate_status = Some(format!("❌ 同步失败: {} (已保持当前汇率)", e));
+                }
+            }
+        }
+
+        // 2.1 检查是否有异步模型目录抓取结果返回
+        while let Ok(res) = self.pricing_rx.try_recv() {
+            self.is_fetching_pricing = false;
+            match res {
+                Ok(catalog) => {
+                    let save_res = crate::pricing_catalog::save_cached_to_disk(&catalog);
+                    let meta = crate::pricing_catalog::apply_online_catalog(catalog);
+                    self.config.last_pricing_fetch_time = meta.updated_at.clone();
+                    self.config.save();
+                    let warn_suffix = save_res.err().map(|e| format!("（写缓存警告: {}）", e)).unwrap_or_default();
+                    self.pricing_sync_status = Some(format!(
+                        "✅ 模型列表已同步：共 {} 个模型（在线收录 {} · 来源: {} · {}）{}",
+                        meta.total_count,
+                        meta.online_count,
+                        meta.source.as_deref().unwrap_or("-"),
+                        meta.updated_at.as_deref().unwrap_or("-"),
+                        warn_suffix
+                    ));
+                    self.refresh_stats();
+                    self.calendar_state.refresh(&self.collector, &self.config);
+                }
+                Err(e) => {
+                    self.pricing_sync_status = Some(format!("❌ 在线更新失败: {} (已继续使用本地模型表)", e));
                 }
             }
         }
@@ -1818,6 +1870,84 @@ impl TokenHudApp {
                                         });
                                         ui.add_space(4.0);
 
+                                        // 在线模型库同步卡片 (主源 models.dev，备用源 OpenRouter)
+                                        let catalog_meta = crate::pricing_catalog::catalog_meta();
+                                        theme::card().show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("🌐 模型列表在线更新:").strong().color(Color32::from_rgb(56, 189, 248)));
+                                                if let Some(src) = &catalog_meta.source {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "共 {} 个模型 · 在线 {} · 来源: {} · 更新于 {}",
+                                                            catalog_meta.total_count,
+                                                            catalog_meta.online_count,
+                                                            src,
+                                                            catalog_meta.updated_at.as_deref().unwrap_or("未知")
+                                                        ))
+                                                        .size(11.0)
+                                                        .color(Color32::from_rgb(148, 163, 184)),
+                                                    );
+                                                } else {
+                                                    ui.label(
+                                                        RichText::new(format!("内置离线模型表 (共 {} 个模型)", catalog_meta.total_count))
+                                                            .size(11.0)
+                                                            .color(Color32::from_rgb(148, 163, 184)),
+                                                    );
+                                                }
+                                            });
+
+                                            ui.add_space(4.0);
+                                            ui.horizontal_wrapped(|ui| {
+                                                let btn_label = if self.is_fetching_pricing {
+                                                    "🔄 正在从 models.dev / OpenRouter 同步模型列表..."
+                                                } else {
+                                                    "🔄 在线更新模型列表"
+                                                };
+                                                let sync_btn = ui.add_enabled(
+                                                    !self.is_fetching_pricing,
+                                                    egui::Button::new(RichText::new(btn_label).size(11.0).color(Color32::from_rgb(56, 189, 248))),
+                                                );
+                                                if sync_btn.clicked() {
+                                                    self.is_fetching_pricing = true;
+                                                    let tx = self.pricing_tx.clone();
+                                                    let ctx_rep = ctx.clone();
+                                                    std::thread::spawn(move || {
+                                                        let res = crate::pricing_catalog::fetch_online_pricing_catalog();
+                                                        let _ = tx.send(res);
+                                                        ctx_rep.request_repaint();
+                                                    });
+                                                }
+
+                                                if catalog_meta.online_count > 0 {
+                                                    if ui.button(RichText::new("↺ 恢复内置列表").size(11.0)).clicked() {
+                                                        let meta = crate::pricing_catalog::clear_cached_catalog();
+                                                        self.config.last_pricing_fetch_time = None;
+                                                        self.config.save();
+                                                        self.pricing_sync_status = Some(format!("已清除在线缓存，回退至内置模型表（共 {} 个模型）", meta.total_count));
+                                                        self.refresh_stats();
+                                                        self.calendar_state.refresh(&self.collector, &self.config);
+                                                    }
+                                                }
+
+                                                ui.add_space(6.0);
+                                                if ui.checkbox(&mut self.config.auto_fetch_pricing, "每日自动在线同步最新模型列表与定价").changed() {
+                                                    self.config.save();
+                                                }
+                                            });
+
+                                            if let Some(status) = &self.pricing_sync_status {
+                                                ui.add_space(2.0);
+                                                let st_color = if status.starts_with('❌') {
+                                                    Color32::from_rgb(248, 113, 113)
+                                                } else {
+                                                    Color32::from_rgb(74, 222, 128)
+                                                };
+                                                ui.label(RichText::new(status).size(11.0).color(st_color));
+                                            }
+                                        });
+                                        ui.add_space(6.0);
+
                                         // 搜索栏与快捷过滤
                                         ui.horizontal(|ui| {
                                             ui.label("🔍");
@@ -1846,7 +1976,7 @@ impl TokenHudApp {
                                         });
                                         ui.add_space(6.0);
 
-                                        let defaults = HudConfig::official_pricing_list();
+                                        let defaults = crate::pricing_catalog::active_catalog_list();
                                         let mut remove_custom_id: Option<String> = None;
                                         let mut save_custom_price: Option<(String, ModelPrice)> = None;
 
@@ -1855,7 +1985,11 @@ impl TokenHudApp {
 
                                         let mut match_count = 0;
 
-                                        for (id, provider, default_p) in defaults {
+                                        for item in defaults {
+                                            let id = item.id.as_str();
+                                            let provider = item.provider.as_str();
+                                            let default_p = item.price;
+                                            let is_online = item.from_online;
                                             // 厂商分类过滤
                                             if filter_prov != "全部" {
                                                 let match_p = match filter_prov {
@@ -1869,7 +2003,19 @@ impl TokenHudApp {
                                                     "智谱" => provider.contains("智谱"),
                                                     "海螺 MiniMax" => provider.contains("MiniMax"),
                                                     "文心/混元" => provider.contains("百度") || provider.contains("腾讯") || provider.contains("混元") || provider.contains("文心"),
-                                                    "其他" => provider.contains("Mistral") || provider.contains("Llama") || provider.contains("Yi") || provider.contains("Cohere"),
+                                                    "其他" => !(provider.contains("Claude")
+                                                        || provider.contains("OpenAI")
+                                                        || provider.contains("Gemini")
+                                                        || provider.contains("DeepSeek")
+                                                        || provider.contains("通义")
+                                                        || provider.contains("Grok")
+                                                        || provider.contains("Kimi")
+                                                        || provider.contains("智谱")
+                                                        || provider.contains("MiniMax")
+                                                        || provider.contains("百度")
+                                                        || provider.contains("腾讯")
+                                                        || provider.contains("混元")
+                                                        || provider.contains("文心")),
                                                     _ => true,
                                                 };
                                                 if !match_p {
@@ -1909,11 +2055,16 @@ impl TokenHudApp {
                                                         p if p.contains("MiniMax") => Color32::from_rgb(249, 115, 22),
                                                         p if p.contains("百度") || p.contains("文心") => Color32::from_rgb(59, 130, 246),
                                                         p if p.contains("腾讯") || p.contains("混元") => Color32::from_rgb(16, 185, 129),
+                                                        p if p.contains("EXAONE") => Color32::from_rgb(236, 72, 153),
                                                         _ => Color32::from_rgb(192, 132, 252),
                                                     };
 
                                                     ui.label(RichText::new(&p.display_name).strong().size(12.0));
                                                     ui.label(RichText::new(format!("[{}]", provider)).size(10.0).color(prov_color));
+
+                                                    if is_online {
+                                                        ui.label(RichText::new("[在线]").size(10.0).color(Color32::from_rgb(56, 189, 248)));
+                                                    }
 
                                                     if is_custom {
                                                         ui.colored_label(Color32::from_rgb(251, 146, 60), "[自定义已生效]");

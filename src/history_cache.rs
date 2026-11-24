@@ -21,7 +21,7 @@ pub fn local_start_of_today() -> i64 {
 }
 
 /// 历史归档金额的计价规则版本，规则变化时递增以触发缓存重建
-const PRICING_REV: u32 = 2;
+const PRICING_REV: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CachedModelData {

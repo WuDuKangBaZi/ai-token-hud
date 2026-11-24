@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"] // 隐藏控制台黑框
 
 mod config;
+mod pricing_catalog;
 mod detector;
 mod collector;
 mod history_cache;

@@ -80,7 +80,11 @@ impl ToolDetector {
                 "opencode",
                 "OpenCode",
                 "#ec4899",
-                vec![home.join(".opencode")],
+                vec![
+                    home.join(".opencode"),
+                    home.join(".local\\share\\opencode"),
+                    home.join(".config\\opencode"),
+                ],
             ),
         ];
 

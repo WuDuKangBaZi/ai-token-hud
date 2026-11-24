@@ -46,6 +46,10 @@ fn default_auto_fetch_rate() -> bool {
     true
 }
 
+fn default_auto_fetch_pricing() -> bool {
+    true
+}
+
 fn default_driver_mode() -> String {
     "auto".to_string()
 }
@@ -67,6 +71,12 @@ pub struct HudConfig {
     /// 上次成功获取汇率的时间描述
     #[serde(default)]
     pub last_rate_fetch_time: Option<String>,
+    /// 是否按 24 小时周期自动从公开网络接口同步最新模型列表与定价
+    #[serde(default = "default_auto_fetch_pricing")]
+    pub auto_fetch_pricing: bool,
+    /// 上次成功同步模型列表的时间描述
+    #[serde(default)]
+    pub last_pricing_fetch_time: Option<String>,
     /// 数据源模式: "auto" (智能探测: 有 CC Switch 则优先，否则原生扫描), "ccswitch" (强制 CC Switch), "native" (强制原生扫描)
     #[serde(default = "default_driver_mode")]
     pub driver_mode: String,
@@ -97,6 +107,8 @@ impl Default for HudConfig {
             usd_to_cny_rate: 7.25,
             auto_fetch_rate: true,
             last_rate_fetch_time: None,
+            auto_fetch_pricing: true,
+            last_pricing_fetch_time: None,
             driver_mode: "auto".to_string(),
             daily_budget_usd: 0.0,
             hud_pos: None,
@@ -291,13 +303,10 @@ impl HudConfig {
         None
     }
 
-    /// 内置单价表中与模型标识精确对应的条目 (允许带 `provider/` 前缀)。
+    /// 单价表中与模型标识精确对应的条目 (含运行期在线缓存，允许带 `provider/` 前缀)。
     /// 不做模糊匹配：用于给数据源未计价的记录补算金额，宁可不算也不能套错单价。
-    pub fn official_price_exact(model: &str) -> Option<&'static ModelPrice> {
-        static TABLE: std::sync::OnceLock<HashMap<String, ModelPrice>> = std::sync::OnceLock::new();
-        let table = TABLE.get_or_init(Self::official_default_pricing);
-        let clean = model.trim().to_lowercase().replace("gtp", "gpt").replace('_', "-").replace(' ', "-");
-        table.get(&clean).or_else(|| table.get(clean.split('/').last().unwrap_or(&clean)))
+    pub fn official_price_exact(model: &str) -> Option<ModelPrice> {
+        crate::pricing_catalog::exact_price(model)
     }
 
     /// 内置表中单价为估算值、厂商并未公布官方价的模型。
@@ -330,39 +339,31 @@ impl HudConfig {
     }
 
     pub fn get_model_price(&self, model: &str) -> ModelPrice {
-        let clean = model.to_lowercase().replace("gtp", "gpt").replace('_', "-").replace(' ', "-");
-        if let Some(p) = self.custom_pricing.get(&clean) {
+        if let Some(p) = self.get_custom_price_if_any(model) {
             return p.clone();
         }
 
-        let defaults = Self::official_default_pricing();
-        if let Some(p) = defaults.get(&clean) {
-            return p.clone();
+        if let Some(p) = crate::pricing_catalog::exact_price(model) {
+            return p;
         }
 
-        // Substring / suffix match
-        if clean.contains('/') {
-            let sub = clean.split('/').last().unwrap_or(&clean);
-            if let Some(p) = self.custom_pricing.get(sub) {
-                return p.clone();
-            }
-            if let Some(p) = defaults.get(sub) {
-                return p.clone();
-            }
-        }
+        let clean = crate::pricing_catalog::normalize_model_id(model);
 
         // 特殊旗舰与系列别名快速匹配
         if clean.contains("astra") {
-            if let Some(p) = defaults.get("gpt-6-astra") {
-                return p.clone();
+            let key = if clean.contains("6.2") || clean.contains("6-2") {
+                "gpt-6.2-astra"
+            } else {
+                "gpt-6-astra"
+            };
+            if let Some(p) = crate::pricing_catalog::exact_price(key) {
+                return p;
             }
         }
 
-        // 有序模式匹配：优先匹配更具体长名称模型
-        for (id, _provider, p) in Self::official_pricing_list() {
-            if clean.contains(id) || id.contains(&clean) {
-                return p;
-            }
+        // 有序模式匹配：优先匹配更具体长名称模型（含在线目录）
+        if let Some(p) = crate::pricing_catalog::fuzzy_price(&clean) {
+            return p;
         }
 
         ModelPrice {
@@ -376,35 +377,65 @@ impl HudConfig {
 
     pub fn official_pricing_list() -> Vec<(&'static str, &'static str, ModelPrice)> {
         vec![
-            // ================= 🟣 Anthropic Claude 系列 =================
+            // ================= 🟣 Anthropic Claude 系列 (对照 2026-11 官方价) =================
+            ("claude-fable-5-2", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5.2".into(), input: 8.0, output: 40.0, cache_read: 0.2, cache_write: 10.0 }),
+            ("claude-fable-5-1", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5.1".into(), input: 10.0, output: 50.0, cache_read: 0.25, cache_write: 12.5 }),
+            ("claude-fable-5", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }),
+            ("claude-opus-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 5.5".into(), input: 4.0, output: 20.0, cache_read: 0.2, cache_write: 5.0 }),
+            ("claude-sonnet-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Sonnet 5.5".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 2.5 }),
+            ("claude-haiku-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Haiku 5.5".into(), input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 }),
+            ("claude-opus-5", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 5".into(), input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }),
+            ("claude-sonnet-5", "Anthropic Claude", ModelPrice { display_name: "Claude Sonnet 5".into(), input: 2.0, output: 10.0, cache_read: 0.2, cache_write: 2.5 }),
+            ("claude-opus-4-8", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 4.8".into(), input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }),
+            ("claude-opus-4-7", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 4.7".into(), input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }),
+            ("claude-opus-4-6", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 4.6".into(), input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }),
+            ("claude-opus-4-5", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 4.5".into(), input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }),
+            ("claude-sonnet-4-6", "Anthropic Claude", ModelPrice { display_name: "Claude Sonnet 4.6".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }),
+            ("claude-sonnet-4-5", "Anthropic Claude", ModelPrice { display_name: "Claude Sonnet 4.5".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }),
+            ("claude-haiku-4-5", "Anthropic Claude", ModelPrice { display_name: "Claude Haiku 4.5".into(), input: 1.0, output: 5.0, cache_read: 0.1, cache_write: 1.25 }),
             ("claude-3-7-sonnet", "Anthropic Claude", ModelPrice { display_name: "Claude 3.7 Sonnet".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }),
             ("claude-3-5-sonnet", "Anthropic Claude", ModelPrice { display_name: "Claude 3.5 Sonnet".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }),
             ("claude-3-5-haiku", "Anthropic Claude", ModelPrice { display_name: "Claude 3.5 Haiku".into(), input: 0.8, output: 4.0, cache_read: 0.08, cache_write: 1.0 }),
             ("claude-3-opus", "Anthropic Claude", ModelPrice { display_name: "Claude 3 Opus".into(), input: 15.0, output: 75.0, cache_read: 1.5, cache_write: 18.75 }),
             ("claude-3-haiku", "Anthropic Claude", ModelPrice { display_name: "Claude 3 Haiku".into(), input: 0.25, output: 1.25, cache_read: 0.025, cache_write: 0.3125 }),
-            ("claude-opus-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Opus 5.5".into(), input: 4.0, output: 20.0, cache_read: 0.2, cache_write: 5.0 }),
-            ("claude-sonnet-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Sonnet 5.5".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 2.5 }),
-            ("claude-haiku-5-5", "Anthropic Claude", ModelPrice { display_name: "Claude Haiku 5.5".into(), input: 0.5, output: 2.5, cache_read: 0.05, cache_write: 0.625 }),
-            // 单价取自 platform.claude.com/docs/en/about-claude/pricing (2026-11-10)；Fable 5.1 / 5.2 的缓存读取为输入价的 0.025 倍
-            ("claude-fable-5-2", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5.2".into(), input: 8.0, output: 40.0, cache_read: 0.2, cache_write: 10.0 }),
-            ("claude-fable-5-1", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5.1".into(), input: 10.0, output: 50.0, cache_read: 0.25, cache_write: 12.5 }),
-            ("claude-fable-5", "Anthropic Claude", ModelPrice { display_name: "Claude Fable 5".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }),
 
             // ================= 🟢 OpenAI 系列 =================
+            ("gpt-6.2-astra", "OpenAI", ModelPrice { display_name: "GPT-6.2 Astra".into(), input: 8.0, output: 40.0, cache_read: 0.4, cache_write: 10.0 }),
+            ("gpt-6.2-sol", "OpenAI", ModelPrice { display_name: "GPT-6.2 Sol".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 2.5 }),
+            ("gpt-6.1-sol", "OpenAI", ModelPrice { display_name: "GPT-6.1 Sol (编程推理强化)".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 2.5 }),
+            ("gpt-6.1-terra", "OpenAI", ModelPrice { display_name: "GPT-6.1 Terra".into(), input: 1.0, output: 5.0, cache_read: 0.05, cache_write: 1.25 }),
             ("gpt-6-astra-fast", "OpenAI", ModelPrice { display_name: "GPT-6 Astra (Fast 高速版)".into(), input: 20.0, output: 100.0, cache_read: 2.0, cache_write: 0.0 }),
-            ("gpt-6-astra", "OpenAI", ModelPrice { display_name: "GPT-6 Astra (旗舰基准)".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 0.0 }),
-            ("gpt-6.1-sol", "OpenAI", ModelPrice { display_name: "GPT-6.1 Sol (编程推理强化)".into(), input: 2.0, output: 10.0, cache_read: 0.10, cache_write: 0.0 }),
-            ("gpt-6-sol", "OpenAI", ModelPrice { display_name: "GPT-6 Sol".into(), input: 2.0, output: 10.0, cache_read: 0.10, cache_write: 0.0 }),
-            ("gpt-6-luna", "OpenAI", ModelPrice { display_name: "GPT-6 Luna (极速轻量)".into(), input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.0 }),
-            ("gpt-6", "OpenAI", ModelPrice { display_name: "GPT-6".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 0.0 }),
-            ("gpt-5.6-sol", "OpenAI", ModelPrice { display_name: "GPT-5.6 Sol".into(), input: 4.0, output: 20.0, cache_read: 0.40, cache_write: 0.0 }),
-            ("gpt-5.6-terra", "OpenAI", ModelPrice { display_name: "GPT-5.6 Terra".into(), input: 3.0, output: 15.0, cache_read: 0.30, cache_write: 0.0 }),
-            ("gpt-5.6-luna", "OpenAI", ModelPrice { display_name: "GPT-5.6 Luna".into(), input: 0.20, output: 1.20, cache_read: 0.02, cache_write: 0.0 }),
+            ("gpt-6-astra", "OpenAI", ModelPrice { display_name: "GPT-6 Astra (旗舰基准)".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }),
+            ("gpt-6-sol", "OpenAI", ModelPrice { display_name: "GPT-6 Sol".into(), input: 2.0, output: 10.0, cache_read: 0.2, cache_write: 2.5 }),
+            ("gpt-6-luna", "OpenAI", ModelPrice { display_name: "GPT-6 Luna (极速轻量)".into(), input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 }),
+            ("gpt-6", "OpenAI", ModelPrice { display_name: "GPT-6".into(), input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }),
+            ("gpt-5.6-sol", "OpenAI", ModelPrice { display_name: "GPT-5.6 Sol".into(), input: 4.0, output: 20.0, cache_read: 0.4, cache_write: 5.0 }),
+            ("gpt-5.6-terra", "OpenAI", ModelPrice { display_name: "GPT-5.6 Terra".into(), input: 2.0, output: 12.0, cache_read: 0.2, cache_write: 2.5 }),
+            ("gpt-5.6-luna", "OpenAI", ModelPrice { display_name: "GPT-5.6 Luna".into(), input: 0.2, output: 1.2, cache_read: 0.02, cache_write: 0.25 }),
+            ("gpt-5.6", "OpenAI", ModelPrice { display_name: "GPT-5.6".into(), input: 4.0, output: 20.0, cache_read: 0.4, cache_write: 5.0 }),
+            ("gpt-5.5-pro", "OpenAI", ModelPrice { display_name: "GPT-5.5 Pro".into(), input: 30.0, output: 180.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("gpt-5.5", "OpenAI", ModelPrice { display_name: "GPT-5.5".into(), input: 5.0, output: 30.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("gpt-5.4-pro", "OpenAI", ModelPrice { display_name: "GPT-5.4 Pro".into(), input: 30.0, output: 180.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("gpt-5.4", "OpenAI", ModelPrice { display_name: "GPT-5.4".into(), input: 2.5, output: 15.0, cache_read: 0.25, cache_write: 0.0 }),
+            ("gpt-5.4-mini", "OpenAI", ModelPrice { display_name: "GPT-5.4 mini".into(), input: 0.75, output: 4.5, cache_read: 0.075, cache_write: 0.0 }),
+            ("gpt-5.4-nano", "OpenAI", ModelPrice { display_name: "GPT-5.4 nano".into(), input: 0.2, output: 1.25, cache_read: 0.02, cache_write: 0.0 }),
+            ("gpt-5.3-codex", "OpenAI", ModelPrice { display_name: "GPT-5.3 Codex".into(), input: 1.75, output: 14.0, cache_read: 0.175, cache_write: 0.0 }),
+            ("gpt-5.2-pro", "OpenAI", ModelPrice { display_name: "GPT-5.2 Pro".into(), input: 21.0, output: 168.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("gpt-5.2", "OpenAI", ModelPrice { display_name: "GPT-5.2".into(), input: 1.75, output: 14.0, cache_read: 0.175, cache_write: 0.0 }),
+            ("gpt-5.1", "OpenAI", ModelPrice { display_name: "GPT-5.1".into(), input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 0.0 }),
+            ("gpt-5-pro", "OpenAI", ModelPrice { display_name: "GPT-5 Pro".into(), input: 15.0, output: 120.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("gpt-5", "OpenAI", ModelPrice { display_name: "GPT-5".into(), input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 0.0 }),
+            ("gpt-5-mini", "OpenAI", ModelPrice { display_name: "GPT-5 Mini".into(), input: 0.25, output: 2.0, cache_read: 0.025, cache_write: 0.0 }),
+            ("gpt-5-nano", "OpenAI", ModelPrice { display_name: "GPT-5 Nano".into(), input: 0.05, output: 0.4, cache_read: 0.005, cache_write: 0.0 }),
             ("gpt-4.5-preview", "OpenAI", ModelPrice { display_name: "GPT-4.5 Preview".into(), input: 75.0, output: 150.0, cache_read: 37.5, cache_write: 0.0 }),
             ("gpt-4.5", "OpenAI", ModelPrice { display_name: "GPT-4.5".into(), input: 75.0, output: 150.0, cache_read: 37.5, cache_write: 0.0 }),
+            ("gpt-4.1", "OpenAI", ModelPrice { display_name: "GPT-4.1".into(), input: 2.0, output: 8.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("gpt-4.1-mini", "OpenAI", ModelPrice { display_name: "GPT-4.1 mini".into(), input: 0.4, output: 1.6, cache_read: 0.1, cache_write: 0.0 }),
+            ("o3-pro", "OpenAI", ModelPrice { display_name: "OpenAI o3-pro".into(), input: 20.0, output: 80.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("o3", "OpenAI", ModelPrice { display_name: "OpenAI o3".into(), input: 2.0, output: 8.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("o3-mini", "OpenAI", ModelPrice { display_name: "OpenAI o3-mini".into(), input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 0.0 }),
             ("o1-mini", "OpenAI", ModelPrice { display_name: "OpenAI o1-mini".into(), input: 3.0, output: 12.0, cache_read: 1.5, cache_write: 0.0 }),
             ("o1", "OpenAI", ModelPrice { display_name: "OpenAI o1".into(), input: 15.0, output: 60.0, cache_read: 7.5, cache_write: 0.0 }),
-            ("o3-mini", "OpenAI", ModelPrice { display_name: "OpenAI o3-mini".into(), input: 1.1, output: 4.4, cache_read: 0.55, cache_write: 0.0 }),
             ("gpt-4o-mini", "OpenAI", ModelPrice { display_name: "GPT-4o mini".into(), input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.0 }),
             ("gpt-4o", "OpenAI", ModelPrice { display_name: "GPT-4o".into(), input: 2.5, output: 10.0, cache_read: 1.25, cache_write: 0.0 }),
             ("gpt-4-turbo", "OpenAI", ModelPrice { display_name: "GPT-4 Turbo".into(), input: 10.0, output: 30.0, cache_read: 5.0, cache_write: 0.0 }),
@@ -413,39 +444,67 @@ impl HudConfig {
             ("codex-auto-review", "OpenAI", ModelPrice { display_name: "Codex Auto Review".into(), input: 2.0, output: 10.0, cache_read: 0.5, cache_write: 0.0 }),
 
             // ================= 🔵 Google Gemini 系列 =================
+            ("gemini-4-neon", "Google Gemini", ModelPrice { display_name: "Gemini 4 Neon".into(), input: 3.0, output: 15.0, cache_read: 0.15, cache_write: 0.0 }),
+            ("gemini-4-carbon", "Google Gemini", ModelPrice { display_name: "Gemini 4 Carbon".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 0.0 }),
+            ("gemini-4-argon", "Google Gemini", ModelPrice { display_name: "Gemini 4 Argon".into(), input: 2.0, output: 10.0, cache_read: 0.1, cache_write: 0.0 }),
+            ("gemini-4-hydrogen", "Google Gemini", ModelPrice { display_name: "Gemini 4 Hydrogen".into(), input: 1.5, output: 7.5, cache_read: 0.075, cache_write: 0.0 }),
+            ("gemini-3.8-flash-high", "Google Gemini", ModelPrice { display_name: "Gemini 3.8 Flash High".into(), input: 0.75, output: 3.75, cache_read: 0.075, cache_write: 0.0 }),
+            ("gemini-3.8-flash", "Google Gemini", ModelPrice { display_name: "Gemini 3.8 Flash".into(), input: 0.75, output: 3.75, cache_read: 0.075, cache_write: 0.0 }),
+            ("gemini-3.7-flash", "Google Gemini", ModelPrice { display_name: "Gemini 3.7 Flash".into(), input: 0.75, output: 3.75, cache_read: 0.075, cache_write: 0.0 }),
+            ("gemini-3.6-flash", "Google Gemini", ModelPrice { display_name: "Gemini 3.6 Flash".into(), input: 0.75, output: 3.75, cache_read: 0.075, cache_write: 0.0 }),
+            ("gemini-3.5-flash", "Google Gemini", ModelPrice { display_name: "Gemini 3.5 Flash".into(), input: 1.5, output: 9.0, cache_read: 0.15, cache_write: 0.0 }),
+            ("gemini-3.5-flash-lite", "Google Gemini", ModelPrice { display_name: "Gemini 3.5 Flash Lite".into(), input: 0.3, output: 2.5, cache_read: 0.03, cache_write: 0.0 }),
+            ("gemini-3.1-pro-preview", "Google Gemini", ModelPrice { display_name: "Gemini 3.1 Pro Preview".into(), input: 2.0, output: 12.0, cache_read: 0.2, cache_write: 0.0 }),
+            ("gemini-3.1-flash-lite", "Google Gemini", ModelPrice { display_name: "Gemini 3.1 Flash Lite".into(), input: 0.25, output: 1.5, cache_read: 0.025, cache_write: 0.0 }),
+            ("gemini-3-flash-preview", "Google Gemini", ModelPrice { display_name: "Gemini 3 Flash Preview".into(), input: 0.5, output: 3.0, cache_read: 0.05, cache_write: 0.0 }),
+            ("gemini-2.5-pro", "Google Gemini", ModelPrice { display_name: "Gemini 2.5 Pro".into(), input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 0.0 }),
+            ("gemini-2.5-flash", "Google Gemini", ModelPrice { display_name: "Gemini 2.5 Flash".into(), input: 0.3, output: 2.5, cache_read: 0.03, cache_write: 0.0 }),
+            ("gemini-2.5-flash-lite", "Google Gemini", ModelPrice { display_name: "Gemini 2.5 Flash-Lite".into(), input: 0.1, output: 0.4, cache_read: 0.01, cache_write: 0.0 }),
             ("gemini-2.0-flash-lite", "Google Gemini", ModelPrice { display_name: "Gemini 2.0 Flash-Lite".into(), input: 0.075, output: 0.3, cache_read: 0.01875, cache_write: 0.0 }),
             ("gemini-2.0-flash", "Google Gemini", ModelPrice { display_name: "Gemini 2.0 Flash".into(), input: 0.1, output: 0.4, cache_read: 0.025, cache_write: 0.0 }),
-            ("gemini-2.5-pro", "Google Gemini", ModelPrice { display_name: "Gemini 2.5 Pro".into(), input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 0.0 }),
             ("gemini-2.0-pro", "Google Gemini", ModelPrice { display_name: "Gemini 2.0 Pro Exp".into(), input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 0.0 }),
             ("gemini-1.5-pro", "Google Gemini", ModelPrice { display_name: "Gemini 1.5 Pro".into(), input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 0.0 }),
             ("gemini-1.5-flash-8b", "Google Gemini", ModelPrice { display_name: "Gemini 1.5 Flash-8B".into(), input: 0.0375, output: 0.15, cache_read: 0.01, cache_write: 0.0 }),
             ("gemini-1.5-flash", "Google Gemini", ModelPrice { display_name: "Gemini 1.5 Flash".into(), input: 0.075, output: 0.3, cache_read: 0.01875, cache_write: 0.0 }),
-            ("gemini-3.8-flash-high", "Google Gemini", ModelPrice { display_name: "Gemini 3.8 Flash High".into(), input: 0.75, output: 3.75, cache_read: 0.075, cache_write: 0.0 }),
 
             // ================= 🔴 DeepSeek 系列 =================
+            ("deepseek-v4-pro", "DeepSeek", ModelPrice { display_name: "DeepSeek V4 Pro".into(), input: 0.66, output: 1.98, cache_read: 0.022, cache_write: 0.0 }),
+            ("deepseek-v4.1-flash", "DeepSeek", ModelPrice { display_name: "DeepSeek V4.1 Flash".into(), input: 0.15, output: 0.6, cache_read: 0.003, cache_write: 0.0 }),
+            ("deepseek-v4-flash", "DeepSeek", ModelPrice { display_name: "DeepSeek V4 Flash".into(), input: 0.15, output: 0.6, cache_read: 0.003, cache_write: 0.0 }),
+            ("deepseek-v4-flash-vision-exp", "DeepSeek", ModelPrice { display_name: "DeepSeek V4 Flash Vision".into(), input: 0.15, output: 0.6, cache_read: 0.003, cache_write: 0.0 }),
             ("deepseek-reasoner", "DeepSeek", ModelPrice { display_name: "DeepSeek R1 (Reasoner)".into(), input: 0.55, output: 2.19, cache_read: 0.14, cache_write: 0.0 }),
             ("deepseek-chat", "DeepSeek", ModelPrice { display_name: "DeepSeek V3 (Chat)".into(), input: 0.14, output: 0.28, cache_read: 0.014, cache_write: 0.0 }),
-            ("deepseek-flash", "DeepSeek", ModelPrice { display_name: "DeepSeek V4.1 Flash".into(), input: 0.15, output: 0.6, cache_read: 0.003, cache_write: 0.0 }),
-            ("deepseek-v4-pro", "DeepSeek", ModelPrice { display_name: "DeepSeek V4 Pro".into(), input: 0.66, output: 1.98, cache_read: 0.022, cache_write: 0.0 }),
             ("deepseek-coder", "DeepSeek", ModelPrice { display_name: "DeepSeek Coder V2".into(), input: 0.14, output: 0.28, cache_read: 0.014, cache_write: 0.0 }),
 
             // ================= 🟠 阿里通义千问 Qwen 系列 =================
+            ("qwen3.8-max", "阿里通义千问", ModelPrice { display_name: "Qwen 3.8 Max".into(), input: 2.0, output: 6.0, cache_read: 0.25, cache_write: 2.5 }),
+            ("qwen-3.8-27b", "阿里通义千问", ModelPrice { display_name: "Qwen 3.8 27B".into(), input: 0.3, output: 1.5, cache_read: 0.06, cache_write: 0.0 }),
+            ("qwen3.8-flash", "阿里通义千问", ModelPrice { display_name: "Qwen 3.8 Flash".into(), input: 0.15, output: 0.47, cache_read: 0.016, cache_write: 0.2 }),
+            ("qwen3.7-max", "阿里通义千问", ModelPrice { display_name: "Qwen 3.7 Max".into(), input: 2.5, output: 7.5, cache_read: 0.5, cache_write: 3.125 }),
+            ("qwen3.7-plus", "阿里通义千问", ModelPrice { display_name: "Qwen 3.7 Plus".into(), input: 0.4, output: 1.6, cache_read: 0.08, cache_write: 0.5 }),
+            ("qwen3.7-flash", "阿里通义千问", ModelPrice { display_name: "Qwen 3.7 Flash".into(), input: 0.03, output: 0.13, cache_read: 0.006, cache_write: 0.0375 }),
+            ("qwen3.6-max-preview", "阿里通义千问", ModelPrice { display_name: "Qwen 3.6 Max Preview".into(), input: 1.3, output: 7.8, cache_read: 0.13, cache_write: 1.625 }),
+            ("qwen-3.6-plus", "阿里通义千问", ModelPrice { display_name: "Qwen 3.6 Plus".into(), input: 0.5, output: 3.0, cache_read: 0.05, cache_write: 0.625 }),
+            ("qwen3.6-flash", "阿里通义千问", ModelPrice { display_name: "Qwen 3.6 Flash".into(), input: 0.25, output: 1.5, cache_read: 0.025, cache_write: 0.3125 }),
+            ("qwen3.5-plus", "阿里通义千问", ModelPrice { display_name: "Qwen 3.5 Plus".into(), input: 0.4, output: 2.4, cache_read: 0.0, cache_write: 0.0 }),
+            ("qwen3.5-flash", "阿里通义千问", ModelPrice { display_name: "Qwen 3.5 Flash".into(), input: 0.1, output: 0.4, cache_read: 0.01, cache_write: 0.125 }),
+            ("qwen3-max", "阿里通义千问", ModelPrice { display_name: "Qwen3 Max".into(), input: 1.2, output: 6.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("qwen3-coder-plus", "阿里通义千问", ModelPrice { display_name: "Qwen3 Coder Plus".into(), input: 1.0, output: 5.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("qwen3-coder-flash", "阿里通义千问", ModelPrice { display_name: "Qwen3 Coder Flash".into(), input: 0.3, output: 1.5, cache_read: 0.06, cache_write: 0.375 }),
             ("qwen-max", "阿里通义千问", ModelPrice { display_name: "Qwen Max (旗舰版)".into(), input: 1.6, output: 6.4, cache_read: 0.32, cache_write: 0.0 }),
-            ("qwen-plus", "阿里通义千问", ModelPrice { display_name: "Qwen Plus (增强版)".into(), input: 0.4, output: 1.2, cache_read: 0.08, cache_write: 0.0 }),
+            ("qwen-plus", "阿里通义千问", ModelPrice { display_name: "Qwen Plus (增强版)".into(), input: 0.4, output: 1.2, cache_read: 0.08, cache_write: 0.5 }),
+            ("qwen-flash", "阿里通义千问", ModelPrice { display_name: "Qwen Flash".into(), input: 0.05, output: 0.4, cache_read: 0.01, cache_write: 0.0625 }),
             ("qwen-turbo", "阿里通义千问", ModelPrice { display_name: "Qwen Turbo (高速版)".into(), input: 0.05, output: 0.2, cache_read: 0.01, cache_write: 0.0 }),
             ("qwen-2.5-coder-32b", "阿里通义千问", ModelPrice { display_name: "Qwen 2.5 Coder 32B".into(), input: 0.3, output: 1.5, cache_read: 0.06, cache_write: 0.0 }),
             ("qwen-2.5-coder-7b", "阿里通义千问", ModelPrice { display_name: "Qwen 2.5 Coder 7B".into(), input: 0.1, output: 0.4, cache_read: 0.02, cache_write: 0.0 }),
             ("qwen-2.5-72b", "阿里通义千问", ModelPrice { display_name: "Qwen 2.5 72B".into(), input: 0.5, output: 2.0, cache_read: 0.1, cache_write: 0.0 }),
             ("qwq-32b-preview", "阿里通义千问", ModelPrice { display_name: "QwQ 32B (推理版)".into(), input: 0.4, output: 1.6, cache_read: 0.08, cache_write: 0.0 }),
 
-            // ================= 🟤 Mistral AI 系列 =================
-            ("codestral", "Mistral AI", ModelPrice { display_name: "Codestral 25.01 (代码专家)".into(), input: 0.3, output: 0.9, cache_read: 0.03, cache_write: 0.0 }),
-            ("mistral-large", "Mistral AI", ModelPrice { display_name: "Mistral Large".into(), input: 0.7, output: 2.1, cache_read: 0.07, cache_write: 0.0 }),
-            ("mistral-small", "Mistral AI", ModelPrice { display_name: "Mistral Small".into(), input: 0.15, output: 0.6, cache_read: 0.015, cache_write: 0.0 }),
-
             // ================= 🌙 月之暗面 Moonshot Kimi 系列 =================
-            ("kimi-k3.1-pro", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K3.1 Pro".into(), input: 2.0, output: 10.0, cache_read: 0.2, cache_write: 0.0 }),
-            ("kimi-k3", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K3".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 0.0 }),
+            ("kimi-k3.1-pro-highspeed", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K3.1 Pro Highspeed".into(), input: 4.0, output: 20.0, cache_read: 0.2, cache_write: 4.0 }),
+            ("kimi-k3.1-pro", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K3.1 Pro".into(), input: 2.0, output: 10.0, cache_read: 0.2, cache_write: 2.0 }),
+            ("kimi-k3", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K3".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.0 }),
+            ("kimi-k2.7-code-highspeed", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K2.7 Code HighSpeed".into(), input: 1.9, output: 8.0, cache_read: 0.38, cache_write: 0.0 }),
             ("kimi-k2.7-code", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K2.7 Code (编程)".into(), input: 0.95, output: 4.0, cache_read: 0.19, cache_write: 0.0 }),
             ("kimi-k2.6", "月之暗面 Kimi", ModelPrice { display_name: "Kimi K2.6".into(), input: 0.95, output: 4.0, cache_read: 0.16, cache_write: 0.0 }),
             ("moonshot-v1-128k", "月之暗面 Kimi", ModelPrice { display_name: "Moonshot V1 128K".into(), input: 1.6, output: 8.0, cache_read: 0.2, cache_write: 0.0 }),
@@ -453,19 +512,27 @@ impl HudConfig {
             ("moonshot-v1-8k", "月之暗面 Kimi", ModelPrice { display_name: "Moonshot V1 8K".into(), input: 0.8, output: 2.5, cache_read: 0.1, cache_write: 0.0 }),
 
             // ================= ⚡ 智谱 AI (GLM) 系列 =================
+            ("glm-5.3", "智谱 GLM", ModelPrice { display_name: "GLM-5.3".into(), input: 1.4, output: 4.4, cache_read: 0.26, cache_write: 0.0 }),
+            ("glm-5.3-flash", "智谱 GLM", ModelPrice { display_name: "GLM-5.3 Flash".into(), input: 0.15, output: 0.5, cache_read: 0.03, cache_write: 0.0 }),
+            ("glm-5.3-flashx", "智谱 GLM", ModelPrice { display_name: "GLM-5.3 FlashX".into(), input: 0.37, output: 1.25, cache_read: 0.075, cache_write: 0.0 }),
+            ("glm-5.2", "智谱 GLM", ModelPrice { display_name: "GLM-5.2".into(), input: 1.4, output: 4.4, cache_read: 0.26, cache_write: 0.0 }),
+            ("glm-5.1", "智谱 GLM", ModelPrice { display_name: "GLM-5.1".into(), input: 1.4, output: 4.4, cache_read: 0.26, cache_write: 0.0 }),
+            ("glm-5-turbo", "智谱 GLM", ModelPrice { display_name: "GLM-5 Turbo".into(), input: 1.2, output: 4.0, cache_read: 0.24, cache_write: 0.0 }),
             ("glm-5", "智谱 GLM", ModelPrice { display_name: "GLM-5 (智谱旗舰)".into(), input: 1.0, output: 3.2, cache_read: 0.2, cache_write: 0.0 }),
             ("glm-4.7", "智谱 GLM", ModelPrice { display_name: "GLM-4.7".into(), input: 0.6, output: 2.2, cache_read: 0.11, cache_write: 0.0 }),
+            ("glm-4.7-flash", "智谱 GLM", ModelPrice { display_name: "GLM-4.7 Flash (免费版)".into(), input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("glm-4.6", "智谱 GLM", ModelPrice { display_name: "GLM-4.6".into(), input: 0.6, output: 2.2, cache_read: 0.11, cache_write: 0.0 }),
+            ("glm-4.5", "智谱 GLM", ModelPrice { display_name: "GLM-4.5".into(), input: 0.6, output: 2.2, cache_read: 0.11, cache_write: 0.0 }),
             ("glm-4-plus", "智谱 GLM", ModelPrice { display_name: "GLM-4 Plus".into(), input: 1.0, output: 3.2, cache_read: 0.2, cache_write: 0.0 }),
             ("glm-4-air", "智谱 GLM", ModelPrice { display_name: "GLM-4 Air".into(), input: 0.2, output: 1.1, cache_read: 0.03, cache_write: 0.0 }),
             ("glm-4-flash", "智谱 GLM", ModelPrice { display_name: "GLM-4 Flash (免费版)".into(), input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 }),
 
-            // ================= 🌐 Meta Llama 开源商业推理系列 =================
-            ("llama-3.3-70b", "Meta Llama", ModelPrice { display_name: "Llama 3.3 70B Instruct".into(), input: 0.6, output: 0.8, cache_read: 0.1, cache_write: 0.0 }),
-            ("llama-3.1-405b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 405B Instruct".into(), input: 2.5, output: 5.0, cache_read: 0.5, cache_write: 0.0 }),
-            ("llama-3.1-70b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 70B Instruct".into(), input: 0.6, output: 0.8, cache_read: 0.1, cache_write: 0.0 }),
-            ("llama-3.1-8b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 8B Instruct".into(), input: 0.05, output: 0.1, cache_read: 0.01, cache_write: 0.0 }),
-
             // ================= 🚀 xAI Grok 系列 =================
+            ("grok-4.7", "xAI Grok", ModelPrice { display_name: "Grok 4.7".into(), input: 2.0, output: 6.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("grok-4.6", "xAI Grok", ModelPrice { display_name: "Grok 4.6".into(), input: 2.0, output: 6.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("grok-4.5", "xAI Grok", ModelPrice { display_name: "Grok 4.5".into(), input: 2.0, output: 6.0, cache_read: 0.3, cache_write: 0.0 }),
+            ("grok-4.3", "xAI Grok", ModelPrice { display_name: "Grok 4.3".into(), input: 1.25, output: 2.5, cache_read: 0.2, cache_write: 0.0 }),
+            ("grok-4.20-0309-reasoning", "xAI Grok", ModelPrice { display_name: "Grok 4.20 (Reasoning)".into(), input: 1.25, output: 2.5, cache_read: 0.2, cache_write: 0.0 }),
             ("grok-3-mini", "xAI Grok", ModelPrice { display_name: "Grok 3 Mini (推理轻量)".into(), input: 0.3, output: 0.5, cache_read: 0.03, cache_write: 0.0 }),
             ("grok-3", "xAI Grok", ModelPrice { display_name: "Grok 3 (旗舰思考)".into(), input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 0.0 }),
             ("grok-2-vision", "xAI Grok", ModelPrice { display_name: "Grok 2 Vision (多模态)".into(), input: 2.0, output: 10.0, cache_read: 0.2, cache_write: 0.0 }),
@@ -474,7 +541,33 @@ impl HudConfig {
             // ================= 🐚 MiniMax 海螺 AI 系列 =================
             ("minimax-m3.1-flash", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M3.1 Flash".into(), input: 0.15, output: 0.6, cache_read: 0.015, cache_write: 0.0 }),
             ("minimax-m3", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M3 (全模态)".into(), input: 0.3, output: 1.2, cache_read: 0.06, cache_write: 0.0 }),
+            ("minimax-m2.7-highspeed", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M2.7 Highspeed".into(), input: 0.6, output: 2.4, cache_read: 0.06, cache_write: 0.375 }),
+            ("minimax-m2.7", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M2.7".into(), input: 0.3, output: 1.2, cache_read: 0.06, cache_write: 0.375 }),
+            ("minimax-m2.5-highspeed", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M2.5 Highspeed".into(), input: 0.6, output: 2.4, cache_read: 0.03, cache_write: 0.375 }),
+            ("minimax-m2.5", "MiniMax 海螺", ModelPrice { display_name: "MiniMax M2.5".into(), input: 0.3, output: 1.2, cache_read: 0.03, cache_write: 0.375 }),
             ("minimax-text-01", "MiniMax 海螺", ModelPrice { display_name: "MiniMax Text-01".into(), input: 0.2, output: 1.1, cache_read: 0.04, cache_write: 0.0 }),
+
+            // ================= 🟤 Mistral AI 系列 =================
+            ("mistral-large-4", "Mistral AI", ModelPrice { display_name: "Mistral Large 4".into(), input: 0.7, output: 2.1, cache_read: 0.07, cache_write: 0.0 }),
+            ("mistral-medium-2604", "Mistral AI", ModelPrice { display_name: "Mistral Medium 3.5".into(), input: 1.5, output: 7.5, cache_read: 0.15, cache_write: 0.0 }),
+            ("mistral-small-2603", "Mistral AI", ModelPrice { display_name: "Mistral Small 4".into(), input: 0.15, output: 0.6, cache_read: 0.015, cache_write: 0.0 }),
+            ("codestral-2508", "Mistral AI", ModelPrice { display_name: "Codestral 25.08 (代码专家)".into(), input: 0.3, output: 0.9, cache_read: 0.03, cache_write: 0.0 }),
+            ("codestral", "Mistral AI", ModelPrice { display_name: "Codestral (代码专家)".into(), input: 0.3, output: 0.9, cache_read: 0.03, cache_write: 0.0 }),
+            ("mistral-large", "Mistral AI", ModelPrice { display_name: "Mistral Large".into(), input: 0.7, output: 2.1, cache_read: 0.07, cache_write: 0.0 }),
+            ("mistral-small", "Mistral AI", ModelPrice { display_name: "Mistral Small".into(), input: 0.15, output: 0.6, cache_read: 0.015, cache_write: 0.0 }),
+
+            // ================= 🌸 LG EXAONE 系列 =================
+            ("k-exaone-v2.5", "LG EXAONE", ModelPrice { display_name: "EXAONE 2.5".into(), input: 0.35, output: 1.05, cache_read: 0.035, cache_write: 0.0 }),
+            ("exaone-3.0", "LG EXAONE", ModelPrice { display_name: "EXAONE 3.0".into(), input: 0.35, output: 1.05, cache_read: 0.035, cache_write: 0.0 }),
+            ("exaone-3.5", "LG EXAONE", ModelPrice { display_name: "EXAONE 3.5".into(), input: 0.45, output: 1.35, cache_read: 0.045, cache_write: 0.0 }),
+
+            // ================= 🌐 Meta Muse & Llama 系列 =================
+            ("muse-wonder-1.0", "Meta Llama", ModelPrice { display_name: "Meta Muse Wonder 1.0".into(), input: 4.0, output: 20.0, cache_read: 0.2, cache_write: 0.0 }),
+            ("muse-spark-1.3", "Meta Llama", ModelPrice { display_name: "Meta Muse Spark 1.3".into(), input: 1.25, output: 4.25, cache_read: 0.15, cache_write: 0.0 }),
+            ("llama-3.3-70b", "Meta Llama", ModelPrice { display_name: "Llama 3.3 70B Instruct".into(), input: 0.6, output: 0.8, cache_read: 0.1, cache_write: 0.0 }),
+            ("llama-3.1-405b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 405B Instruct".into(), input: 2.5, output: 5.0, cache_read: 0.5, cache_write: 0.0 }),
+            ("llama-3.1-70b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 70B Instruct".into(), input: 0.6, output: 0.8, cache_read: 0.1, cache_write: 0.0 }),
+            ("llama-3.1-8b", "Meta Llama", ModelPrice { display_name: "Llama 3.1 8B Instruct".into(), input: 0.05, output: 0.1, cache_read: 0.01, cache_write: 0.0 }),
 
             // ================= 🐻 百度文心千帆 ERNIE 系列 =================
             ("ernie-4.0-turbo", "百度文心一言", ModelPrice { display_name: "ERNIE 4.0 Turbo".into(), input: 0.42, output: 1.25, cache_read: 0.15, cache_write: 0.0 }),
@@ -492,17 +585,46 @@ impl HudConfig {
             ("yi-medium", "零一万物 Yi", ModelPrice { display_name: "Yi-Medium".into(), input: 0.35, output: 0.35, cache_read: 0.05, cache_write: 0.0 }),
 
             // ================= 🔮 Cohere 系列 =================
+            ("command-a-plus-05-2026", "Cohere", ModelPrice { display_name: "Command A Plus".into(), input: 2.5, output: 10.0, cache_read: 0.0, cache_write: 0.0 }),
+            ("command-a-03-2025", "Cohere", ModelPrice { display_name: "Command A".into(), input: 2.5, output: 10.0, cache_read: 0.0, cache_write: 0.0 }),
             ("command-r-plus", "Cohere", ModelPrice { display_name: "Command R+".into(), input: 2.5, output: 10.0, cache_read: 0.5, cache_write: 0.0 }),
             ("command-r7b", "Cohere", ModelPrice { display_name: "Command R7B".into(), input: 0.0375, output: 0.15, cache_read: 0.01, cache_write: 0.0 }),
             ("command-r", "Cohere", ModelPrice { display_name: "Command R".into(), input: 0.15, output: 0.6, cache_read: 0.03, cache_write: 0.0 }),
         ]
     }
 
+    /// 别名与底层客户端标识映射：仅用于精准补算与反查，不污染设置界面的官方展示卡片列表
+    pub fn official_aliases() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("k-exaone-2.5", "k-exaone-v2.5"),
+            ("k-exaone", "k-exaone-v2.5"),
+            ("exaone-2.5", "k-exaone-v2.5"),
+            ("exaone", "k-exaone-v2.5"),
+            ("deepseek-flash", "deepseek-v4.1-flash"),
+            ("qwen3.6-plus", "qwen-3.6-plus"),
+            ("qwen3.8-27b", "qwen-3.8-27b"),
+            ("hy4", "hunyuan-4"),
+            ("hy4-preview", "hunyuan-4"),
+            ("gemini-flash-latest", "gemini-3.8-flash"),
+            ("gemini-flash-lite-latest", "gemini-3.5-flash-lite"),
+            ("gemini-pro-latest", "gemini-3.1-pro-preview"),
+        ]
+    }
+
+    #[allow(dead_code)]
     pub fn official_default_pricing() -> HashMap<String, ModelPrice> {
-        Self::official_pricing_list()
+        let mut map: HashMap<String, ModelPrice> = Self::official_pricing_list()
             .into_iter()
             .map(|(id, _provider, p)| (id.to_string(), p))
-            .collect()
+            .collect();
+
+        for (alias, canonical) in Self::official_aliases() {
+            if let Some(target) = map.get(*canonical).cloned() {
+                map.entry(alias.to_string()).or_insert(target);
+            }
+        }
+
+        map
     }
 }
 
@@ -531,8 +653,25 @@ mod tests {
         assert_eq!(cfg.currency, "USD");
         assert_eq!(cfg.usd_to_cny_rate, 7.25);
         assert!(cfg.auto_fetch_rate);
+        assert!(cfg.auto_fetch_pricing);
+        assert!(cfg.last_pricing_fetch_time.is_none());
         assert_eq!(cfg.daily_budget_usd, 0.0);
         assert!(cfg.hud_pos.is_none());
+    }
+
+    #[test]
+    fn test_latest_2026_models_pricing_lookup() {
+        let neon = HudConfig::official_price_exact("gemini-4-neon").expect("Gemini 4 Neon 应收录");
+        assert_eq!((neon.input, neon.output), (3.0, 15.0));
+
+        let astra62 = HudConfig::official_price_exact("openai/gpt-6.2-astra").expect("GPT-6.2 Astra 应收录");
+        assert_eq!((astra62.input, astra62.output, astra62.cache_write), (8.0, 40.0, 10.0));
+
+        let haiku55 = HudConfig::official_price_exact("claude-haiku-5.5").expect("点号写法应精确命中");
+        assert_eq!((haiku55.input, haiku55.output), (0.1, 0.5));
+
+        let grok47 = HudConfig::official_price_exact("grok-4.7").expect("Grok 4.7 应收录");
+        assert_eq!((grok47.input, grok47.output), (2.0, 6.0));
     }
 
     #[test]
@@ -544,6 +683,28 @@ mod tests {
         assert!(HudConfig::official_price_exact("claude-fable-5-2-preview").is_none());
         // 按长名称优先的模糊匹配不会把 5.2 误判为 Fable 5
         assert_eq!(HudConfig::default().get_model_price("claude-fable-5-2").display_name, "Claude Fable 5.2");
+    }
+
+    #[test]
+    fn test_opencode_models_pricing_and_exact_lookup() {
+        // 1. EXAONE (k-exaone_v2.5 / K-EXAONE 2.5)
+        let exaone = HudConfig::official_price_exact("k-exaone_v2.5").expect("k-exaone_v2.5 应被识别");
+        assert_eq!((exaone.input, exaone.output), (0.35, 1.05));
+        assert_eq!(exaone.display_name, "EXAONE 2.5");
+
+        // 2. DeepSeek V4.1 Flash
+        let ds = HudConfig::official_price_exact("deepseek-v4.1-flash").expect("deepseek-v4.1-flash 应被识别");
+        assert_eq!((ds.input, ds.output), (0.15, 0.6));
+
+        // 3. GLM-5.3 Flash
+        let glm = HudConfig::official_price_exact("glm-5.3-flash").expect("glm-5.3-flash 应被识别");
+        assert_eq!((glm.input, glm.output), (0.15, 0.5));
+
+        // 4. Qwen 3.6 Plus & Qwen 3.8 27B
+        let qwen36 = HudConfig::official_price_exact("qwen3.6-plus").expect("qwen3.6-plus 应被识别");
+        assert_eq!((qwen36.input, qwen36.output), (0.5, 3.0));
+        let qwen38 = HudConfig::official_price_exact("qwen3.8-27b").expect("qwen3.8-27b 应被识别");
+        assert_eq!((qwen38.input, qwen38.output), (0.3, 1.5));
     }
 
     #[test]

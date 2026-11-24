@@ -76,6 +76,18 @@ pub fn model_color(short_name: &str) -> Color32 {
         Color32::from_rgb(59, 130, 246) // 亮蓝
     } else if s.starts_with("Qwen") {
         Color32::from_rgb(168, 85, 247) // 紫色
+    } else if s.starts_with("EXAONE") {
+        Color32::from_rgb(236, 72, 153) // 桃粉色 (LG EXAONE)
+    } else if s.starts_with("GLM") {
+        Color32::from_rgb(59, 130, 246) // 智谱
+    } else if s.starts_with("Kimi") {
+        Color32::from_rgb(168, 85, 247) // Kimi 紫
+    } else if s.starts_with("Grok") {
+        Color32::from_rgb(236, 72, 153) // xAI 桃粉
+    } else if s.starts_with("MiniMax") {
+        Color32::from_rgb(249, 115, 22) // 海螺橙
+    } else if s.starts_with("Meta") || s.starts_with("Llama") {
+        Color32::from_rgb(56, 189, 248) // Meta 蓝
     } else {
         PURPLE
     }
