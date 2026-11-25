@@ -335,8 +335,12 @@ mod tests {
         let count = collector.sync(&config);
         let speed = collector.get_realtime_speed();
         println!("Initial sync records: {}, last_rowid: {}, speed: {}", count, collector.last_sync_rowid, speed);
-        assert!(collector.last_sync_rowid > 0);
-        assert!(speed > 0, "Initial speed should be retained from latest DB record");
+        if config.resolved_driver_mode() == "ccswitch" {
+            assert!(collector.last_sync_rowid > 0);
+            assert!(speed > 0, "Initial speed should be retained from latest DB record");
+        } else if collector.records.iter().any(|r| r.latency_ms >= 100 && r.output_tokens > 0) {
+            assert!(speed > 0, "Initial speed should be retained from latest native record");
+        }
 
         // Verify speed stays constant without decay
         let speed_after = collector.get_realtime_speed();

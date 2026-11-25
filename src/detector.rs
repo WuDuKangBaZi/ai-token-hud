@@ -39,6 +39,7 @@ impl ToolDetector {
             cursor_paths.push(PathBuf::from("/opt/cursor"));
         }
 
+        #[allow(unused_mut)]
         let mut copilot_paths = vec![
             home.join(".copilot"),
             home.join(".config").join("github-copilot"),

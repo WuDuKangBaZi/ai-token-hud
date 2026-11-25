@@ -1,6 +1,4 @@
 use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 
 /// 按 Freedesktop Desktop Entry Exec 规范对可执行路径进行转义与加引号
 #[cfg_attr(target_os = "windows", allow(dead_code))]

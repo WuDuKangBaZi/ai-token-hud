@@ -650,6 +650,7 @@ pub fn system_dpi_scale() -> f32 {
             }
         }
         if let Ok((conn, screen_num)) = x11rb::rust_connection::RustConnection::connect(None) {
+            use x11rb::connection::Connection;
             use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
             if let Some(screen) = conn.setup().roots.get(screen_num) {
                 if let Ok(cookie) = conn.get_property(
