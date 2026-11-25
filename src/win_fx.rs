@@ -235,6 +235,22 @@ fn apply_linux_x11_wm_state(always_on_top: bool) -> bool {
         return false;
     }
 
+    // 读取当前实际的 _NET_WM_STATE，确认窗口管理器确实已生效（防止窗口刚映射时 ClientMessage 被竞争丢弃）
+    let current_states: Vec<u32> = conn
+        .get_property(false, win, wm_state, AtomEnum::ATOM, 0, 64)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .and_then(|r| r.value32().map(|it| it.collect()))
+        .unwrap_or_default();
+    let has_above = current_states.contains(&above);
+    let has_skip = skip_tb == 0 || current_states.contains(&skip_tb);
+    if has_above == always_on_top && has_skip {
+        if dbg {
+            eprintln!("[win_fx] verified _NET_WM_STATE on win=0x{:x} (above={})", win, has_above);
+        }
+        return true;
+    }
+
     let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
     let action = if always_on_top { 1u32 } else { 0u32 };
     let ev_above = ClientMessageEvent::new(32, win, wm_state, [action, above, sticky, 1, 0]);
@@ -248,9 +264,12 @@ fn apply_linux_x11_wm_state(always_on_top: bool) -> bool {
 
     let fl = conn.flush();
     if dbg {
-        eprintln!("[win_fx] sent _NET_WM_STATE action={} win=0x{:x} send={:?} flush={:?}", action, win, r1.is_ok(), fl.is_ok());
+        eprintln!(
+            "[win_fx] sent _NET_WM_STATE action={} win=0x{:x} (was above={}) send={:?} flush={:?}",
+            action, win, has_above, r1.is_ok(), fl.is_ok()
+        );
     }
-    true
+    false
 }
 
 #[cfg(target_os = "windows")]

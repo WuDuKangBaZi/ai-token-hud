@@ -144,6 +144,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "windows-sys 0.59.0",
+ "winit",
  "x11rb",
  "zstd",
 ]
