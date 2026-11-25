@@ -1,9 +1,13 @@
+#[cfg(target_os = "windows")]
 use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU8, Ordering};
 use tray_icon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::HWND;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow,
     SW_HIDE, SW_SHOW,
@@ -21,6 +25,53 @@ pub static TOGGLE_THEME_FLAG: AtomicBool = AtomicBool::new(false);
 /// 托盘菜单请求退出程序（通知主循环先行落盘缓存后退出）
 pub static QUIT_APP_FLAG: AtomicBool = AtomicBool::new(false);
 
+/// 非 Windows 平台上的显隐控制信号 (0 = 无, 1 = 显示, 2 = 隐藏)
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub static PENDING_VISIBILITY_CMD: AtomicU8 = AtomicU8::new(0);
+/// 非 Windows IPC 打开工作台指定页签 (-1 = 不改页签)
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub static PENDING_SETTINGS_TAB: AtomicI8 = AtomicI8::new(-1);
+
+static EGUI_CTX: std::sync::OnceLock<eframe::egui::Context> = std::sync::OnceLock::new();
+#[cfg(not(target_os = "windows"))]
+static HUD_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+pub fn register_context(ctx: eframe::egui::Context) {
+    let _ = EGUI_CTX.set(ctx);
+}
+
+/// 生成超采样抗锯齿 32x32 仪表盘光环图标 (用于系统托盘与窗口图标)
+pub fn build_app_icon_rgba() -> (Vec<u8>, u32, u32) {
+    let width = 32u32;
+    let height = 32u32;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - 15.5;
+            let dy = y as f32 - 15.5;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist <= 14.8 {
+                let edge_aa = ((14.8 - dist) / 1.1).clamp(0.0, 1.0);
+                let (r, g, b) = if dist <= 5.2 {
+                    // 核心脉冲青蓝
+                    (96u8, 165u8, 250u8)
+                } else if dist <= 11.4 {
+                    // 深曜石底盘
+                    (15u8, 23u8, 42u8)
+                } else {
+                    // 翡翠绿能量外环
+                    (52u8, 211u8, 153u8)
+                };
+                rgba.extend_from_slice(&[r, g, b, (edge_aa * 255.0) as u8]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    (rgba, width, height)
+}
+
+#[cfg(target_os = "windows")]
 pub fn find_hud_hwnd() -> HWND {
     let title: Vec<u16> = OsStr::new("AI Token HUD Bar")
         .encode_wide()
@@ -39,6 +90,7 @@ pub fn find_hud_hwnd() -> HWND {
     std::ptr::null_mut()
 }
 
+#[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn is_hud_visible() -> bool {
     let hwnd = find_hud_hwnd();
@@ -49,6 +101,13 @@ pub fn is_hud_visible() -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn is_hud_visible() -> bool {
+    HUD_VISIBLE.load(Ordering::SeqCst)
+}
+
+#[cfg(target_os = "windows")]
 pub fn hide_hud() {
     let hwnd = find_hud_hwnd();
     if !hwnd.is_null() {
@@ -58,6 +117,20 @@ pub fn hide_hud() {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+pub fn hide_hud() {
+    HUD_VISIBLE.store(false, Ordering::SeqCst);
+    PENDING_VISIBILITY_CMD.store(2, Ordering::SeqCst);
+    if let Some(ctx) = EGUI_CTX.get() {
+        ctx.send_viewport_cmd_to(
+            eframe::egui::ViewportId::ROOT,
+            eframe::egui::ViewportCommand::Visible(false),
+        );
+        ctx.request_repaint();
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub fn show_hud() {
     let hwnd = find_hud_hwnd();
     if !hwnd.is_null() {
@@ -68,6 +141,24 @@ pub fn show_hud() {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+pub fn show_hud() {
+    HUD_VISIBLE.store(true, Ordering::SeqCst);
+    PENDING_VISIBILITY_CMD.store(1, Ordering::SeqCst);
+    if let Some(ctx) = EGUI_CTX.get() {
+        ctx.send_viewport_cmd_to(
+            eframe::egui::ViewportId::ROOT,
+            eframe::egui::ViewportCommand::Visible(true),
+        );
+        ctx.send_viewport_cmd_to(
+            eframe::egui::ViewportId::ROOT,
+            eframe::egui::ViewportCommand::Focus,
+        );
+        ctx.request_repaint();
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub fn toggle_hud_visibility() {
     let hwnd = find_hud_hwnd();
     if !hwnd.is_null() {
@@ -80,6 +171,15 @@ pub fn toggle_hud_visibility() {
                 SetForegroundWindow(hwnd);
             }
         }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn toggle_hud_visibility() {
+    if is_hud_visible() {
+        hide_hud();
+    } else {
+        show_hud();
     }
 }
 
@@ -167,34 +267,8 @@ impl SystemTray {
         click_through: bool,
         theme_kind: ThemeKind,
     ) -> Option<Self> {
-        // 超采样抗锯齿 32x32 仪表盘光环托盘图标
-        let width = 32u32;
-        let height = 32u32;
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                let dx = x as f32 - 15.5;
-                let dy = y as f32 - 15.5;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist <= 14.8 {
-                    let edge_aa = ((14.8 - dist) / 1.1).clamp(0.0, 1.0);
-                    let (r, g, b) = if dist <= 5.2 {
-                        // 核心脉冲青蓝
-                        (96u8, 165u8, 250u8)
-                    } else if dist <= 11.4 {
-                        // 深曜石底盘
-                        (15u8, 23u8, 42u8)
-                    } else {
-                        // 翡翠绿能量外环
-                        (52u8, 211u8, 153u8)
-                    };
-                    rgba.extend_from_slice(&[r, g, b, (edge_aa * 255.0) as u8]);
-                } else {
-                    rgba.extend_from_slice(&[0, 0, 0, 0]);
-                }
-            }
-        }
-
+        register_context(ctx.clone());
+        let (rgba, width, height) = build_app_icon_rgba();
         let icon = tray_icon::Icon::from_rgba(rgba, width, height).ok()?;
 
         let menu = Menu::new();

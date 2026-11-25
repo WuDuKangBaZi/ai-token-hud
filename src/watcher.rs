@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-/// 基于操作系统原生文件系统事件 (Windows ReadDirectoryChangesW) 的多源变更监控器
-/// 支持同时监控 CC Switch 数据库与各 AI 工具的原生会话目录 (Claude, Antigravity, Codex)
+/// 基于操作系统原生文件系统事件 (Windows ReadDirectoryChangesW / Linux inotify) 的多源变更监控器
+/// 支持同时监控 CC Switch 数据库与各 AI 工具的原生会话目录 (Claude, Antigravity, Codex, Copilot, OpenCode)
 pub struct DbWatcher {
     _watcher: Option<RecommendedWatcher>,
     pub changed: Arc<AtomicBool>,

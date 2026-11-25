@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_history_cache_rollups() {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\Users\\Administrator"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let db_path = home.join(".cc-switch").join("cc-switch.db");
         if db_path.exists() {
             let mut config = HudConfig::default();

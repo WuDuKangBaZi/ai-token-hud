@@ -161,6 +161,8 @@ pub struct TokenHudApp {
 impl TokenHudApp {
     pub fn new(ctx: &egui::Context) -> Self {
         let mut app = Self::new_headless();
+        crate::tray::register_context(ctx.clone());
+        crate::win_fx::start_ipc_server(ctx.clone());
         let ctx_clone = ctx.clone();
         app.db_watcher = Some(crate::watcher::DbWatcher::new(&app.collector.db_path, move || {
             ctx_clone.request_repaint();
@@ -451,6 +453,7 @@ impl TokenHudApp {
     }
 
     pub fn reposition_for_size(&mut self, ctx: &egui::Context, win_w: f32, win_h: f32) {
+        crate::win_fx::update_cached_monitor_size(ctx.input(|i| i.viewport().monitor_size));
         let cur_outer = ctx.input(|i| i.viewport().outer_rect).map(|r| [r.min.x, r.min.y]);
         let compact_w = self.calculate_compact_bar_width();
         let is_expanded = win_w > compact_w + 1.0 || win_h > HUD_BAR_HEIGHT + 1.0;
@@ -501,14 +504,30 @@ impl TokenHudApp {
         );
     }
 
-    pub fn minimize_to_tray(&mut self) {
+    pub fn minimize_to_tray(&mut self, ctx: &egui::Context) {
         self.collector.flush_native_cache();
-        crate::tray::hide_hud();
+        #[cfg(target_os = "windows")]
+        {
+            let _ = ctx;
+            crate::tray::hide_hud();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if self.tray.is_some() {
+                crate::tray::hide_hud();
+            } else {
+                ctx.send_viewport_cmd_to(
+                    ViewportId::ROOT,
+                    egui::ViewportCommand::Minimized(true),
+                );
+            }
+        }
         crate::win_fx::trim_working_set();
     }
 
     pub fn quit_gracefully(&mut self) {
-        self.collector.flush_native_cache();
+        self.collector.shutdown_native_cache();
+        crate::win_fx::cleanup_ipc_socket();
         std::process::exit(0);
     }
 
@@ -828,12 +847,33 @@ impl eframe::App for TokenHudApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.collector.shutdown_native_cache();
+        crate::win_fx::cleanup_ipc_socket();
     }
 }
 
 impl TokenHudApp {
     pub fn ui(&mut self, ctx: &egui::Context) {
-        // 1. 响应系统托盘与全局热键原子标记
+        // 1. 响应系统托盘、本地 IPC 与全局热键原子标记
+        match crate::tray::PENDING_VISIBILITY_CMD.swap(0, Ordering::SeqCst) {
+            1 => {
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Focus);
+            }
+            2 => {
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Visible(false));
+            }
+            _ => {}
+        }
+        let pending_tab = crate::tray::PENDING_SETTINGS_TAB.swap(-1, Ordering::SeqCst);
+        if pending_tab >= 0 {
+            self.show_settings_window = true;
+            self.settings_tab = (pending_tab as usize).min(5);
+            if self.settings_tab == 0 {
+                self.calendar_state.refresh(&self.collector, &self.config);
+            } else if self.settings_tab == 5 {
+                self.refresh_project_attribution();
+            }
+        }
         if crate::tray::OPEN_SETTINGS_FLAG.swap(false, Ordering::SeqCst) {
             self.show_settings_window = true;
         }
@@ -1023,7 +1063,7 @@ impl TokenHudApp {
             });
         }
 
-        // 4. 文件写入事件驱动增量同步 (ReadDirectoryChangesW 生效时零空闲轮询，仅在事件触发或跨零点时同步)
+        // 4. 文件写入事件驱动增量同步 (Windows ReadDirectoryChangesW / Linux inotify 生效时零空闲轮询，仅在事件触发或跨零点时同步)
         let watcher_active = self.db_watcher.as_ref().is_some_and(|w| w.is_watching());
         let file_event_triggered = self.db_watcher.as_ref().is_some_and(|w| w.take_change());
         let today_start = crate::history_cache::local_start_of_today();
@@ -1057,10 +1097,11 @@ impl TokenHudApp {
             self.cost_dropdown_open = false;
         }
 
-        // 6. 自适应主窗口尺寸与原生 DWM / 穿透状态同步
+        // 6. 自适应主窗口尺寸与原生窗口特效 / 穿透状态同步
         let is_compact_bar = !self.cost_dropdown_open && !self.show_context_menu;
         let theme_kind = self.theme_kind();
         self.win_fx.sync_hud_window(
+            ctx,
             self.config.backdrop_blur,
             self.config.click_through,
             theme_kind,

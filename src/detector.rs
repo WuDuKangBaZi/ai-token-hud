@@ -14,32 +14,73 @@ pub struct ToolDetector;
 
 impl ToolDetector {
     pub fn scan_installed_tools() -> Vec<ToolInfo> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\Users\\Administrator"));
-        let appdata = std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| home.join("AppData\\Roaming"));
-        let localappdata = std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|_| home.join("AppData\\Local"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+        let data_local_dir = dirs::data_local_dir().unwrap_or_else(|| home.join(".local").join("share"));
+
+        #[allow(unused_mut)]
+        let mut cursor_paths = vec![
+            home.join(".cursor"),
+            config_dir.join("Cursor"),
+            data_local_dir.join("cursor"),
+        ];
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                cursor_paths.push(PathBuf::from(appdata).join("Cursor"));
+            }
+            if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+                cursor_paths.push(PathBuf::from(localappdata).join("Programs").join("cursor"));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            cursor_paths.push(PathBuf::from("/usr/share/cursor"));
+            cursor_paths.push(PathBuf::from("/opt/cursor"));
+        }
+
+        let mut copilot_paths = vec![
+            home.join(".copilot"),
+            home.join(".config").join("github-copilot"),
+            config_dir.join("github-copilot"),
+            data_local_dir.join("github-copilot"),
+        ];
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                copilot_paths.push(PathBuf::from(appdata).join("GitHub Copilot"));
+            }
+            if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+                copilot_paths.push(PathBuf::from(localappdata).join("github-copilot"));
+            }
+        }
 
         let defs = vec![
             (
                 "claude",
                 "Claude Code",
                 "#f59e0b",
-                vec![home.join(".claude"), home.join(".claude.json")],
+                vec![
+                    home.join(".claude"),
+                    home.join(".claude.json"),
+                    config_dir.join("claude"),
+                ],
             ),
             (
                 "agy",
                 "Google Antigravity",
                 "#38bdf8",
-                vec![home.join(".gemini\\antigravity"), home.join(".gemini")],
+                vec![
+                    home.join(".gemini").join("antigravity"),
+                    home.join(".gemini").join("antigravity-cli"),
+                    home.join(".gemini"),
+                ],
             ),
             (
                 "cursor",
                 "Cursor",
                 "#c084fc",
-                vec![
-                    home.join(".cursor"),
-                    appdata.join("Cursor"),
-                    localappdata.join("Programs\\cursor"),
-                ],
+                cursor_paths,
             ),
             (
                 "codex",
@@ -51,12 +92,7 @@ impl ToolDetector {
                 "copilot",
                 "GitHub Copilot",
                 "#6366f1",
-                vec![
-                    home.join(".copilot"),
-                    home.join(".config\\github-copilot"),
-                    appdata.join("GitHub Copilot"),
-                    localappdata.join("github-copilot"),
-                ],
+                copilot_paths,
             ),
             (
                 "aider",
@@ -82,8 +118,10 @@ impl ToolDetector {
                 "#ec4899",
                 vec![
                     home.join(".opencode"),
-                    home.join(".local\\share\\opencode"),
-                    home.join(".config\\opencode"),
+                    home.join(".local").join("share").join("opencode"),
+                    home.join(".config").join("opencode"),
+                    data_local_dir.join("opencode"),
+                    config_dir.join("opencode"),
                 ],
             ),
         ];

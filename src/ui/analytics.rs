@@ -456,7 +456,7 @@ pub fn render_analytics_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &Theme
                 );
                 if pill_tab(ui, false, lang.tr("打开所在目录", "Open Folder"), t).clicked() {
                     if let Some(dir) = path.parent() {
-                        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                        crate::win_fx::open_in_file_manager(dir);
                     }
                 }
             });

@@ -274,11 +274,16 @@ pub fn render_hud_bar(app: &mut TokenHudApp, ui: &mut egui::Ui, ctx: &egui::Cont
                         }
 
                         // 4. 最小化至托盘 (居中矢量横杠，彻底消除字符沉底错位)
+                        let min_tip = if cfg!(target_os = "windows") {
+                            lang.tr("收起到右下角系统托盘", "Minimize to System Tray")
+                        } else {
+                            lang.tr("收起到系统托盘", "Minimize to System Tray")
+                        };
                         if icons::icon_button(ui, Icon::Minimize, 20.0, t.text_muted, t.text_primary, t.row_hover, btn_r, false)
-                            .on_hover_text(lang.tr("收起到右下角系统托盘", "Minimize to System Tray"))
+                            .on_hover_text(min_tip)
                             .clicked()
                         {
-                            app.minimize_to_tray();
+                            app.minimize_to_tray(ctx);
                         }
 
                         // 5. 退出按钮 (悬浮鲜红底色)

@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use std::ffi::OsStr;
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
@@ -229,10 +230,82 @@ pub fn get_bytes(url: &str, timeout_secs: u32) -> Result<Vec<u8>, String> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn env_proxy_for(is_https: bool) -> Option<String> {
+    let vars: &[&str] = if is_https {
+        &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+    } else {
+        &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+    };
+    for key in vars {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 通过纯 Rust ureq + rustls 执行 HTTPS/HTTP GET 请求，不依赖系统 OpenSSL 开发库或外部子进程
+#[cfg(target_os = "linux")]
+pub fn get_bytes(url: &str, timeout_secs: u32) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::time::Duration;
+
+    let parsed = parse_http_url(url)?;
+    let timeout = Duration::from_secs(timeout_secs.clamp(1, 120) as u64);
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .user_agent(concat!("AI-Token-HUD/", env!("CARGO_PKG_VERSION")))
+        .https_only(parsed.is_https);
+
+    if let Some(proxy_url) = env_proxy_for(parsed.is_https) {
+        if let Ok(proxy) = ureq::Proxy::new(&proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    let agent = builder.build();
+    let resp = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(format!("HTTP 请求返回状态码 {}: {}", code, url));
+        }
+        Err(ureq::Error::Transport(t)) => {
+            return Err(format!("HTTP 请求失败 ({}): {}", url, t));
+        }
+    };
+
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("HTTP 请求返回状态码 {}: {}", status, url));
+    }
+
+    let mut body = Vec::new();
+    resp.into_reader()
+        .take((MAX_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|e| format!("读取响应体失败 ({}): {}", url, e))?;
+
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "响应体超过 {} MB 上限: {}",
+            MAX_RESPONSE_BYTES / (1024 * 1024),
+            url
+        ));
+    }
+    if body.is_empty() {
+        return Err(format!("服务端返回空响应: {}", url));
+    }
+    Ok(body)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn get_bytes(_url: &str, _timeout_secs: u32) -> Result<Vec<u8>, String> {
     let _ = MAX_RESPONSE_BYTES;
-    Err("HTTP client only implemented on Windows".to_string())
+    Err("HTTP client is only implemented on Windows and Linux".to_string())
 }
 
 #[cfg(test)]

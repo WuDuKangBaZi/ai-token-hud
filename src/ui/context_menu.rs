@@ -168,9 +168,14 @@ pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &Theme
                         app.show_context_menu = false;
                     }
 
-                    if menu_row(ui, Icon::Minimize, lang.tr("收起到右下角系统托盘", "Minimize to System Tray"), t.text_secondary, t).clicked() {
+                    let min_label = if cfg!(target_os = "windows") {
+                        lang.tr("收起到右下角系统托盘", "Minimize to System Tray")
+                    } else {
+                        lang.tr("收起到系统托盘", "Minimize to System Tray")
+                    };
+                    if menu_row(ui, Icon::Minimize, min_label, t.text_secondary, t).clicked() {
                         app.show_context_menu = false;
-                        app.minimize_to_tray();
+                        app.minimize_to_tray(ctx);
                     }
 
                     ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));

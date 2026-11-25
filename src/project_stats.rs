@@ -153,9 +153,11 @@ fn hex_val(b: u8) -> Option<u8> {
 
 pub fn normalize_workspace_path(raw: &str) -> String {
     let mut s = raw.trim().trim_matches(['"', '\'', '`']).to_string();
-    if let Some(rest) = s.strip_prefix("file:///") {
-        s = percent_decode_uri(rest);
-    } else if let Some(rest) = s.strip_prefix("file://") {
+    if let Some(rest) = s.strip_prefix("file://") {
+        let rest = rest
+            .strip_prefix("localhost")
+            .filter(|r| r.starts_with('/'))
+            .unwrap_or(rest);
         s = percent_decode_uri(rest);
     }
 
@@ -165,6 +167,9 @@ pub fn normalize_workspace_path(raw: &str) -> String {
     if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
         let drive = (s.as_bytes()[0] as char).to_ascii_uppercase();
         s = format!("{}{}", drive, &s[1..]).replace('/', "\\");
+    }
+    if s == "/" {
+        return s;
     }
     s.trim_end_matches(['/', '\\']).to_string()
 }
@@ -239,7 +244,8 @@ fn clean_session_title(raw: &str) -> Option<String> {
     }
 }
 
-/// 解码 Claude Code 目录名 (`D--Code-Tools-ai-token-hud`)，在磁盘存在时贪婪匹配带连字符的真实目录名
+/// 解码 Claude Code 目录名 (Windows: `D--Code-Tools-ai-token-hud` / Linux: `-home-alice-ai-token-hud`)，
+/// 在磁盘存在时贪婪匹配带连字符的真实目录名
 pub fn decode_claude_project_dir(encoded: &str) -> (String, String) {
     if let Some((drive, rest)) = encoded.split_once("--") {
         let root_str = format!("{}:\\", drive);
@@ -280,7 +286,49 @@ pub fn decode_claude_project_dir(encoded: &str) -> (String, String) {
         return (name, decoded);
     }
 
-    let decoded = encoded.replace('-', "\\");
+    if let Some(rest) = encoded.strip_prefix('-') {
+        if rest.is_empty() {
+            return ("/".to_string(), "/".to_string());
+        }
+        let parts: Vec<&str> = rest.split('-').collect();
+        let mut cur = std::path::PathBuf::from("/");
+        let mut i = 0;
+        let mut matched_any = false;
+        while i < parts.len() {
+            let mut found_end = None;
+            for j in (i + 1..=parts.len()).rev() {
+                let seg = parts[i..j].join("-");
+                if seg.is_empty() {
+                    continue;
+                }
+                if cur.join(&seg).exists() {
+                    cur.push(&seg);
+                    found_end = Some(j);
+                    matched_any = true;
+                    break;
+                }
+            }
+            if let Some(next_i) = found_end {
+                i = next_i;
+            } else {
+                cur.push(parts[i..].join("/"));
+                break;
+            }
+        }
+        let decoded = if matched_any {
+            cur.to_string_lossy().to_string()
+        } else {
+            format!("/{}", rest.replace('-', "/"))
+        };
+        let name = basename_from_path(&decoded);
+        return (name, decoded);
+    }
+
+    let decoded = if cfg!(windows) {
+        encoded.replace('-', "\\")
+    } else {
+        encoded.replace('-', "/")
+    };
     let name = basename_from_path(&decoded);
     (name, decoded)
 }
@@ -690,7 +738,10 @@ fn extract_workspace_from_prompt_text(txt: &str) -> Option<(String, String)> {
             rest.trim()
         } else if let Some(rest) = trimmed.strip_prefix("- ") {
             let r = rest.trim();
-            if r.starts_with("file:///") || (r.len() >= 3 && r.as_bytes()[1] == b':') {
+            if r.starts_with("file:///")
+                || r.starts_with('/')
+                || (r.len() >= 3 && r.as_bytes()[1] == b':')
+            {
                 r
             } else {
                 continue;
@@ -1302,6 +1353,28 @@ mod tests {
         assert_eq!(res, Some(("ai-token-hud".to_string(), "D:\\Code\\Tools\\ai-token-hud".to_string())));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_linux_posix_workspace_paths_and_claude_dir_decode() {
+        assert_eq!(
+            parse_antigravity_workspace_uris(r#"["file:///home/alice/code/ai-token-hud"]"#),
+            Some(("ai-token-hud".to_string(), "/home/alice/code/ai-token-hud".to_string()))
+        );
+        assert_eq!(
+            normalize_workspace_path("file://localhost/home/alice/my%20repo/"),
+            "/home/alice/my repo"
+        );
+        assert_eq!(
+            decode_claude_project_dir("-home-alice-code-myapp"),
+            ("myapp".to_string(), "/home/alice/code/myapp".to_string())
+        );
+
+        let prompt_txt = "<user_information>\nActive Workspaces:\n- /home/alice/projects/ai-token-hud\n</user_information>";
+        assert_eq!(
+            extract_workspace_from_prompt_text(prompt_txt),
+            Some(("ai-token-hud".to_string(), "/home/alice/projects/ai-token-hud".to_string()))
+        );
     }
 
     #[test]

@@ -430,20 +430,30 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
 
     ui.add_space(8.0);
 
-    // 3. 原生窗口特效与系统集成 (DWM Blur / Click-Through / Always on Top / Autostart)
+    // 3. 原生窗口特效与系统集成 (DWM/Compositor Blur / Click-Through / Always on Top / Autostart)
     let sys_card = theme::card_with(t).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(lang.tr("Windows 原生特效与窗口行为", "Native Window Effects & Behavior")).size(12.5).strong().color(t.text_primary));
+        let sys_title = if cfg!(target_os = "windows") {
+            lang.tr("Windows 原生特效与窗口行为", "Native Window Effects & Behavior")
+        } else {
+            lang.tr("桌面窗口特效与系统行为 (Linux X11 / Wayland)", "Desktop Window Effects & Behavior")
+        };
+        ui.label(RichText::new(sys_title).size(12.5).strong().color(t.text_primary));
         ui.add_space(4.0);
 
         let mut blur = app.config.backdrop_blur;
-        if render_switch_line(
-            ui,
-            lang.tr("Windows DWM 亚克力模糊与原生抗锯齿圆角", "Windows DWM Acrylic Blur & Hardware Rounding"),
-            lang.tr("收起为单行横条时启用硬件毛玻璃背景，彻底消除底层编辑器代码透射干扰", "Applies hardware backdrop blur to prevent sharp desktop text bleed-through"),
-            &mut blur,
-            t,
-        ) {
+        let (blur_title, blur_desc) = if cfg!(target_os = "windows") {
+            (
+                lang.tr("Windows DWM 亚克力模糊与原生抗锯齿圆角", "Windows DWM Acrylic Blur & Hardware Rounding"),
+                lang.tr("收起为单行横条时启用硬件毛玻璃背景，彻底消除底层编辑器代码透射干扰", "Applies hardware backdrop blur to prevent sharp desktop text bleed-through"),
+            )
+        } else {
+            (
+                lang.tr("透明合成器背景与窗口圆角", "Compositor Transparency & Rounded Frame"),
+                lang.tr("收起为单行横条时配合桌面合成器启用半透明 HUD 表面（依赖 X11/Wayland 合成器）", "Uses desktop compositor alpha transparency on the compact HUD bar"),
+            )
+        };
+        if render_switch_line(ui, blur_title, blur_desc, &mut blur, t) {
             app.config.backdrop_blur = blur;
             app.config.save();
         }
@@ -494,10 +504,18 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
         ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
 
         let mut hk = app.config.global_hotkeys_enabled;
+        let hk_desc = if cfg!(target_os = "windows") {
+            lang.tr("在任意编辑器或全屏应用中一键控制悬浮窗：Ctrl+Alt+H 显隐 · Ctrl+Alt+T 穿透 · Ctrl+Alt+F 固定面板", "System-wide shortcuts: Ctrl+Alt+H Show/Hide · Ctrl+Alt+T Click-Through · Ctrl+Alt+F Pin Flyout")
+        } else {
+            lang.tr(
+                "X11 会话原生支持 Ctrl+Alt+H/T/F；Wayland 桌面请在系统快捷键中绑定 ai-token-hud --toggle / --click-through / --flyout",
+                "X11 supports Ctrl+Alt+H/T/F natively; on Wayland bind system shortcuts to ai-token-hud --toggle / --click-through / --flyout",
+            )
+        };
         if render_switch_line(
             ui,
             lang.tr("全局快捷键 (Global Hotkeys)", "Global Hotkeys"),
-            lang.tr("在任意编辑器或全屏应用中一键控制悬浮窗：Ctrl+Alt+H 显隐 · Ctrl+Alt+T 穿透 · Ctrl+Alt+F 固定面板", "System-wide shortcuts: Ctrl+Alt+H Show/Hide · Ctrl+Alt+T Click-Through · Ctrl+Alt+F Pin Flyout"),
+            hk_desc,
             &mut hk,
             t,
         ) {
@@ -510,18 +528,33 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
                 pill_badge(ui, &format!("Ctrl+Alt+T · {}", lang.tr("穿透", "Click-Through")), t.success, t);
                 pill_badge(ui, &format!("Ctrl+Alt+F · {}", lang.tr("固定面板", "Pin Flyout")), t.purple, t);
             });
+            if crate::win_fx::is_wayland() {
+                ui.label(
+                    RichText::new(lang.tr(
+                        "提示：检测到 Wayland 会话，安全策略禁止应用直接拦截全局键盘；可通过命令行参数触发本地 IPC 控制",
+                        "Wayland detected: bind desktop shortcuts to `ai-token-hud --toggle`, `--click-through`, or `--flyout`",
+                    ))
+                    .size(10.2)
+                    .color(t.text_muted),
+                );
+            }
         }
 
         ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
 
         let mut auto_run = app.autostart_enabled;
-        if render_switch_line(
-            ui,
-            lang.tr("开机自动启动", "Launch at Windows Sign-In"),
-            lang.tr("写入当前用户 HKCU Run 注册表项（无需管理员权限），移动 exe 后自动校正路径", "Registers in HKCU Run without admin privileges; auto-heals path if exe moves"),
-            &mut auto_run,
-            t,
-        ) {
+        let (auto_title, auto_desc) = if cfg!(target_os = "windows") {
+            (
+                lang.tr("开机自动启动", "Launch at Windows Sign-In"),
+                lang.tr("写入当前用户 HKCU Run 注册表项（无需管理员权限），移动 exe 后自动校正路径", "Registers in HKCU Run without admin privileges; auto-heals path if exe moves"),
+            )
+        } else {
+            (
+                lang.tr("开机自动启动 (XDG Autostart)", "Launch at Desktop Sign-In"),
+                lang.tr("写入 ~/.config/autostart/ai-token-hud.desktop，移动可执行文件后自动校正 Exec 路径", "Writes ~/.config/autostart/ai-token-hud.desktop; auto-heals Exec path if binary moves"),
+            )
+        };
+        if render_switch_line(ui, auto_title, auto_desc, &mut auto_run, t) {
             match crate::autostart::set_enabled(auto_run) {
                 Ok(()) => {
                     app.autostart_enabled = auto_run;
@@ -619,7 +652,7 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::action_button(ui, Icon::Folder, lang.tr("打开目录", "Open Folder"), t.accent, t.input_bg, t.row_hover, t.border_subtle, t.control_rounding).clicked() {
-                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                    crate::win_fx::open_in_file_manager(&dir);
                 }
                 let rescan_label = if app.is_rescanning {
                     lang.tr("扫描中...", "Scanning...")
@@ -783,17 +816,24 @@ fn render_drivers_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &ThemeTokens
 
         ui.add_space(4.0);
         let watch_count = app.db_watcher.as_ref().map_or(0, |w| w.watched_paths.len());
+        let watcher_backend = if cfg!(target_os = "linux") {
+            "inotify"
+        } else {
+            "ReadDirectoryChangesW"
+        };
         let env_txt = if lang.is_en() {
             format!(
-                "CC Switch: {} · Kernel Watcher: {} directories mounted (ReadDirectoryChangesW, 0% idle CPU)",
+                "CC Switch: {} · Kernel Watcher: {} directories mounted ({}, 0% idle CPU)",
                 if is_cc { "Detected" } else { "Not installed" },
-                watch_count
+                watch_count,
+                watcher_backend
             )
         } else {
             format!(
-                "本机环境: {} · 内核文件监听: 已挂载 {} 个路径 (ReadDirectoryChangesW 事件唤醒，空闲 0% CPU)",
+                "本机环境: {} · 内核文件监听: 已挂载 {} 个路径 ({} 事件唤醒，空闲 0% CPU)",
                 if is_cc { "已检测到 CC Switch" } else { "未安装 CC Switch" },
-                watch_count
+                watch_count,
+                watcher_backend
             )
         };
         ui.label(RichText::new(env_txt).size(10.8).color(t.text_muted));

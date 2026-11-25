@@ -37,7 +37,7 @@ pub struct TokenCollector {
 
 impl Default for TokenCollector {
     fn default() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\Users\\Administrator"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let db_path = home.join(".cc-switch").join("cc-switch.db");
         let today_start = crate::history_cache::local_start_of_today();
 
