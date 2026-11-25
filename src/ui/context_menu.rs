@@ -7,7 +7,7 @@ use crate::ui::hud_bar::HUD_BAR_HEIGHT;
 use crate::ui::icons::{self, Icon};
 use crate::ui::pill_tab;
 
-pub const CONTEXT_MENU_VIEWPORT_HEIGHT: f32 = 340.0;
+pub const CONTEXT_MENU_VIEWPORT_HEIGHT: f32 = 368.0;
 
 pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &ThemeTokens) {
     let lang = app.config.lang();
@@ -155,6 +155,16 @@ pub fn render_context_menu(app: &mut TokenHudApp, ctx: &egui::Context, t: &Theme
                     if menu_row(ui, Icon::Sliders, lang.tr("打开偏好与模型单价设置", "Open Preferences & Pricing"), t.text_primary, t).clicked() {
                         app.show_settings_window = true;
                         app.settings_tab = 3;
+                        app.show_context_menu = false;
+                    }
+
+                    let rescan_menu_lbl = if app.is_rescanning {
+                        lang.tr("正在全量重扫数据...", "Rescanning All Data...")
+                    } else {
+                        lang.tr("全量重新扫描并更新数据", "Full Rescan & Refresh Data")
+                    };
+                    if menu_row(ui, Icon::Refresh, rescan_menu_lbl, t.accent, t).clicked() && !app.is_rescanning {
+                        app.trigger_full_rescan(ctx);
                         app.show_context_menu = false;
                     }
 

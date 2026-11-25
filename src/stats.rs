@@ -336,6 +336,13 @@ impl PeriodBaseCache {
         }
         (wk, mo, all)
     }
+
+    pub fn invalidate(&mut self) {
+        self.today_start = 0;
+        self.driver_mode.clear();
+        self.visible_sig.clear();
+        self.models.clear();
+    }
 }
 
 pub struct StatsEngine;

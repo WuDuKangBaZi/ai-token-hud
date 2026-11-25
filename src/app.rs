@@ -33,6 +33,18 @@ pub enum RangeSortCol {
     Requests,
 }
 
+pub struct FullRescanResult {
+    pub state: crate::native_scanner::NativeScanState,
+    pub daily_archive: crate::native_scanner::NativeDailyArchive,
+    pub today_cache: crate::native_scanner::NativeTodayCache,
+    pub project_index: SessionProjectIndex,
+    pub elapsed_ms: u128,
+    pub file_count: usize,
+    pub daily_count: usize,
+    pub session_day_count: usize,
+    pub today_count: usize,
+}
+
 pub struct TokenHudApp {
     pub config: HudConfig,
     pub collector: TokenCollector,
@@ -134,6 +146,10 @@ pub struct TokenHudApp {
     pub is_fetching_pricing: bool,
     pub pricing_tx: std::sync::mpsc::Sender<Result<crate::pricing_catalog::OnlinePricingCatalog, String>>,
     pub pricing_rx: std::sync::mpsc::Receiver<Result<crate::pricing_catalog::OnlinePricingCatalog, String>>,
+    pub is_rescanning: bool,
+    pub rescan_status: Option<String>,
+    pub rescan_tx: std::sync::mpsc::Sender<FullRescanResult>,
+    pub rescan_rx: std::sync::mpsc::Receiver<FullRescanResult>,
 
     pub autostart_enabled: bool,
     pub autostart_error: Option<String>,
@@ -209,6 +225,7 @@ impl TokenHudApp {
 
         let (rate_tx, rate_rx) = std::sync::mpsc::channel();
         let (pricing_tx, pricing_rx) = std::sync::mpsc::channel();
+        let (rescan_tx, rescan_rx) = std::sync::mpsc::channel();
         let mut calendar_state = crate::range_stats::CalendarViewerState::new();
         calendar_state.refresh(&collector, &config);
 
@@ -297,6 +314,10 @@ impl TokenHudApp {
             is_fetching_pricing: false,
             pricing_tx,
             pricing_rx,
+            is_rescanning: false,
+            rescan_status: None,
+            rescan_tx,
+            rescan_rx,
             autostart_enabled: crate::autostart::is_enabled(),
             autostart_error: None,
             frame_count: 0,
@@ -542,6 +563,52 @@ impl TokenHudApp {
         }
     }
 
+    /// 后台非阻塞全量重新扫描所有原生会话日志与项目索引，完成后替换 SQLite 缓存并重建全部统计视图
+    pub fn trigger_full_rescan(&mut self, ctx: &egui::Context) {
+        if self.is_rescanning {
+            return;
+        }
+        let lang = self.config.lang();
+        self.is_rescanning = true;
+        self.rescan_status = Some(
+            lang.tr(
+                "⏳ 正在全量重新扫描所有会话日志与项目索引...",
+                "⏳ Rescanning all session logs and project index...",
+            )
+            .to_string(),
+        );
+        let config = self.config.clone();
+        let tx = self.rescan_tx.clone();
+        let ctx_rep = ctx.clone();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let today_start = crate::history_cache::local_start_of_today();
+            let mut scanner = crate::native_scanner::NativeScanner::new_ephemeral();
+            let _ = scanner.scan_incremental(&config, today_start);
+
+            let mut project_index = SessionProjectIndex::default();
+            project_index.rebuild();
+
+            let file_count = scanner.state.cursors.len();
+            let daily_count = scanner.daily_archive.entries.len();
+            let session_day_count = scanner.daily_archive.session_days.len();
+            let today_count = scanner.today_cache.records.len();
+
+            let _ = tx.send(FullRescanResult {
+                state: scanner.state,
+                daily_archive: scanner.daily_archive,
+                today_cache: scanner.today_cache,
+                project_index,
+                elapsed_ms: t0.elapsed().as_millis(),
+                file_count,
+                daily_count,
+                session_day_count,
+                today_count,
+            });
+            ctx_rep.request_repaint();
+        });
+    }
+
     /// 修改自定义单价或同步在线模型库后统一调用：回溯重算历史缓存、刷新实时统计与日历/项目面板
     pub fn on_pricing_changed(&mut self) {
         self.history_cache.recompute_costs(&self.config);
@@ -760,7 +827,7 @@ impl eframe::App for TokenHudApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.collector.flush_native_cache();
+        self.collector.shutdown_native_cache();
     }
 }
 
@@ -915,6 +982,45 @@ impl TokenHudApp {
                     });
                 }
             }
+        }
+
+        while let Ok(res) = self.rescan_rx.try_recv() {
+            self.is_rescanning = false;
+            self.collector
+                .native_scanner
+                .apply_full_rescan(res.state, res.daily_archive, res.today_cache);
+            self.collector.today_start = crate::history_cache::local_start_of_today();
+            self.collector.records.clear();
+            self.collector.last_sync_rowid = 0;
+            self.collector.last_sync_timestamp = self.collector.today_start - 1;
+            self.collector.current_speed = 0.0;
+            self.collector.last_speed_update = 0.0;
+            self.collector.sync(&self.config);
+            self.collector.flush_native_cache();
+
+            self.history_cache
+                .force_rebuild(&self.collector.db_path, &self.config);
+            self.period_base_cache.invalidate();
+            self.project_index = res.project_index;
+
+            self.refresh_stats();
+            self.calendar_state.refresh(&self.collector, &self.config);
+            self.refresh_breakdown();
+            self.refresh_project_attribution();
+            self.last_sync = Instant::now();
+
+            let elapsed_s = res.elapsed_ms as f64 / 1000.0;
+            self.rescan_status = Some(if lang.is_en() {
+                format!(
+                    "✅ Rescan complete in {:.2}s: {} files, {} daily entries, {} session-days, {} today records",
+                    elapsed_s, res.file_count, res.daily_count, res.session_day_count, res.today_count
+                )
+            } else {
+                format!(
+                    "✅ 全量重扫完成 ({:.2}s): {} 个文件游标 · {} 条日汇总 · {} 条会话明细 · {} 条今日记录",
+                    elapsed_s, res.file_count, res.daily_count, res.session_day_count, res.today_count
+                )
+            });
         }
 
         // 4. 文件写入事件驱动增量同步 (ReadDirectoryChangesW 生效时零空闲轮询，仅在事件触发或跨零点时同步)

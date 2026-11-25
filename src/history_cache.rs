@@ -174,8 +174,24 @@ impl HistoryCache {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(content) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(p, content);
+            let tmp = p.with_extension("json.tmp");
+            if fs::write(&tmp, &content).is_ok() {
+                if fs::rename(&tmp, &p).is_err() {
+                    let _ = fs::write(&p, &content);
+                    let _ = fs::remove_file(&tmp);
+                }
+            } else {
+                let _ = fs::write(&p, &content);
+            }
         }
+    }
+
+    /// 强制清空同步水位并重建历史归档缓存（用于“全量重新扫描”后同步刷新）
+    pub fn force_rebuild(&mut self, db_path: &Path, config: &HudConfig) -> usize {
+        self.rollups_synced = false;
+        self.last_archived_timestamp = 0;
+        self.driver_sig.clear();
+        self.sync_historical_if_needed(db_path, config)
     }
 
     /// 在单价覆盖或在线模型库更新后，纯内存重算所有历史缓存金额

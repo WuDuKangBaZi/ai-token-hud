@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -7,10 +7,11 @@ use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cache_db::NativeCacheDb;
 use crate::collector::TokenRecord;
 use crate::config::{HudConfig, Usage};
 
-const NATIVE_SCAN_REV: u32 = 3;
+pub(crate) const NATIVE_SCAN_REV: u32 = 3;
 const NATIVE_FLUSH_INTERVAL_SECS: u64 = 10;
 
 /// 单个会话文件的增量解析游标 (支持字节偏移断点续读与累计字段精确求差)
@@ -94,13 +95,9 @@ impl NativeDailyArchive {
         HudConfig::app_dir().join("native_daily.json")
     }
 
-    pub fn load() -> Self {
-        if cfg!(test) {
-            return Self::default();
-        }
-        let p = Self::path();
+    pub fn load_from_path(p: &Path) -> Self {
         if p.exists() {
-            if let Ok(content) = fs::read_to_string(&p) {
+            if let Ok(content) = fs::read_to_string(p) {
                 if let Ok(archive) = serde_json::from_str::<Self>(&content) {
                     return archive;
                 }
@@ -109,6 +106,14 @@ impl NativeDailyArchive {
         Self::default()
     }
 
+    pub fn load() -> Self {
+        if cfg!(test) {
+            return Self::default();
+        }
+        Self::load_from_path(&Self::path())
+    }
+
+    #[allow(dead_code)]
     pub fn save(&self) {
         if cfg!(test) {
             return;
@@ -122,14 +127,14 @@ impl NativeDailyArchive {
         }
     }
 
-    pub fn add_record(&mut self, rec: &TokenRecord) {
+    pub fn add_record(&mut self, rec: &TokenRecord) -> (String, String) {
         let date = Local
             .timestamp_opt(rec.created_at, 0)
             .single()
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "1970-01-01".to_string());
         let key = format!("{}|{}|{}", date, rec.app_type, rec.model);
-        let entry = self.entries.entry(key).or_insert_with(|| NativeDailyEntry {
+        let entry = self.entries.entry(key.clone()).or_insert_with(|| NativeDailyEntry {
             date: date.clone(),
             app_type: rec.app_type.clone(),
             model: rec.model.clone(),
@@ -142,7 +147,7 @@ impl NativeDailyArchive {
         entry.request_count += 1;
 
         let sess_key = format!("{}|{}|{}|{}", date, rec.app_type, rec.session_id, rec.model);
-        let s_entry = self.session_days.entry(sess_key).or_insert_with(|| NativeSessionDayEntry {
+        let s_entry = self.session_days.entry(sess_key.clone()).or_insert_with(|| NativeSessionDayEntry {
             date,
             app_type: rec.app_type.clone(),
             session_id: rec.session_id.clone(),
@@ -155,6 +160,7 @@ impl NativeDailyArchive {
         s_entry.cache_creation_tokens += rec.cache_creation_tokens;
         s_entry.request_count += 1;
         s_entry.last_ts = s_entry.last_ts.max(rec.created_at);
+        (key, sess_key)
     }
 }
 
@@ -168,17 +174,14 @@ pub struct NativeTodayCache {
 }
 
 impl NativeTodayCache {
+    #[allow(dead_code)]
     pub fn path() -> PathBuf {
         HudConfig::app_dir().join("native_today.json")
     }
 
-    pub fn load() -> Self {
-        if cfg!(test) {
-            return Self::default();
-        }
-        let p = Self::path();
+    pub fn load_from_path(p: &Path) -> Self {
         if p.exists() {
-            if let Ok(content) = fs::read_to_string(&p) {
+            if let Ok(content) = fs::read_to_string(p) {
                 if let Ok(cache) = serde_json::from_str::<Self>(&content) {
                     return cache;
                 }
@@ -187,6 +190,15 @@ impl NativeTodayCache {
         Self::default()
     }
 
+    #[allow(dead_code)]
+    pub fn load() -> Self {
+        if cfg!(test) {
+            return Self::default();
+        }
+        Self::load_from_path(&Self::path())
+    }
+
+    #[allow(dead_code)]
     pub fn save(&self) {
         if cfg!(test) {
             return;
@@ -207,6 +219,13 @@ pub struct NativeScanner {
     pub today_cache: NativeTodayCache,
     #[allow(dead_code)]
     pub cache_file: PathBuf,
+    cache_db: Option<NativeCacheDb>,
+    dirty_cursor_keys: HashSet<String>,
+    dirty_daily_keys: HashSet<String>,
+    dirty_session_day_keys: HashSet<String>,
+    pending_today_records: Vec<TokenRecord>,
+    today_pruned_before: Option<i64>,
+    needs_full_replace: bool,
     pub(crate) cursors_dirty: bool,
     pub(crate) archive_dirty: bool,
     pub(crate) today_dirty: bool,
@@ -220,9 +239,80 @@ impl Default for NativeScanner {
 }
 
 impl NativeScanner {
+    pub fn db_path() -> PathBuf {
+        HudConfig::app_dir().join("native_cache.db")
+    }
+
+    /// 创建纯内存临时扫描器（不打开 SQLite，用于测试与后台全量重新扫描线程）
+    pub fn new_ephemeral() -> Self {
+        Self {
+            state: NativeScanState {
+                rev: NATIVE_SCAN_REV,
+                cursors: HashMap::new(),
+            },
+            daily_archive: NativeDailyArchive::default(),
+            today_cache: NativeTodayCache::default(),
+            cache_file: Self::db_path(),
+            cache_db: None,
+            dirty_cursor_keys: HashSet::new(),
+            dirty_daily_keys: HashSet::new(),
+            dirty_session_day_keys: HashSet::new(),
+            pending_today_records: Vec::new(),
+            today_pruned_before: None,
+            needs_full_replace: false,
+            cursors_dirty: false,
+            archive_dirty: false,
+            today_dirty: false,
+            last_flush: None,
+        }
+    }
+
     pub fn new() -> Self {
-        let cache_file = HudConfig::app_dir().join("native_cursors.json");
-        let (state, daily_archive, today_cache) = if cfg!(test) {
+        if cfg!(test) {
+            return Self::new_ephemeral();
+        }
+
+        let app_dir = HudConfig::app_dir();
+        let db_path = Self::db_path();
+        let mut cache_db = NativeCacheDb::open(&db_path).ok();
+        let (mut state, daily_archive, today_cache) = if let Some(ref mut db) = cache_db {
+            match db.get_scan_rev() {
+                Some(rev) if rev == NATIVE_SCAN_REV => db.load_all().unwrap_or_else(|_| {
+                    (
+                        NativeScanState {
+                            rev: NATIVE_SCAN_REV,
+                            cursors: HashMap::new(),
+                        },
+                        NativeDailyArchive::default(),
+                        NativeTodayCache::default(),
+                    )
+                }),
+                None => {
+                    if let Some(migrated) = db.migrate_legacy_json_in_dir(&app_dir, NATIVE_SCAN_REV) {
+                        migrated
+                    } else {
+                        let empty_state = NativeScanState {
+                            rev: NATIVE_SCAN_REV,
+                            cursors: HashMap::new(),
+                        };
+                        let empty_arch = NativeDailyArchive::default();
+                        let empty_today = NativeTodayCache::default();
+                        let _ = db.replace_all(&empty_state, &empty_arch, &empty_today);
+                        (empty_state, empty_arch, empty_today)
+                    }
+                }
+                Some(_) => {
+                    let empty_state = NativeScanState {
+                        rev: NATIVE_SCAN_REV,
+                        cursors: HashMap::new(),
+                    };
+                    let empty_arch = NativeDailyArchive::default();
+                    let empty_today = NativeTodayCache::default();
+                    let _ = db.replace_all(&empty_state, &empty_arch, &empty_today);
+                    (empty_state, empty_arch, empty_today)
+                }
+            }
+        } else {
             (
                 NativeScanState {
                     rev: NATIVE_SCAN_REV,
@@ -231,34 +321,35 @@ impl NativeScanner {
                 NativeDailyArchive::default(),
                 NativeTodayCache::default(),
             )
-        } else {
-            let loaded: Option<NativeScanState> = if cache_file.exists() {
-                fs::read_to_string(&cache_file)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-            } else {
-                None
-            };
-            match loaded {
-                Some(st) if st.rev == NATIVE_SCAN_REV => {
-                    (st, NativeDailyArchive::load(), NativeTodayCache::load())
-                }
-                _ => (
-                    NativeScanState {
-                        rev: NATIVE_SCAN_REV,
-                        cursors: HashMap::new(),
-                    },
-                    NativeDailyArchive::default(),
-                    NativeTodayCache::default(),
-                ),
-            }
         };
+
+        let stale_cursors: Vec<String> = state
+            .cursors
+            .keys()
+            .filter(|p| !Path::new(p).exists())
+            .cloned()
+            .collect();
+        if !stale_cursors.is_empty() {
+            for p in &stale_cursors {
+                state.cursors.remove(p);
+            }
+            if let Some(ref mut db) = cache_db {
+                let _ = db.delete_cursors(&stale_cursors);
+            }
+        }
 
         Self {
             state,
             daily_archive,
             today_cache,
-            cache_file,
+            cache_file: db_path,
+            cache_db,
+            dirty_cursor_keys: HashSet::new(),
+            dirty_daily_keys: HashSet::new(),
+            dirty_session_day_keys: HashSet::new(),
+            pending_today_records: Vec::new(),
+            today_pruned_before: None,
+            needs_full_replace: false,
             cursors_dirty: false,
             archive_dirty: false,
             today_dirty: false,
@@ -267,7 +358,11 @@ impl NativeScanner {
     }
 
     pub fn load_daily_archive() -> NativeDailyArchive {
-        NativeDailyArchive::load()
+        if cfg!(test) {
+            return NativeDailyArchive::default();
+        }
+        NativeCacheDb::load_daily_archive_readonly(&Self::db_path())
+            .unwrap_or_else(NativeDailyArchive::load)
     }
 
     pub fn cached_today_records(&self, today_start: i64) -> Vec<TokenRecord> {
@@ -282,39 +377,62 @@ impl NativeScanner {
     pub fn prune_today_cache(&mut self, today_start: i64) {
         let before = self.today_cache.records.len();
         self.today_cache.records.retain(|r| r.created_at >= today_start);
+        self.pending_today_records.retain(|r| r.created_at >= today_start);
         if self.today_cache.today_start != today_start || self.today_cache.records.len() != before {
             self.today_cache.today_start = today_start;
-            self.today_cache.save();
-            self.today_dirty = false;
+            self.today_pruned_before = Some(
+                self.today_pruned_before
+                    .map_or(today_start, |prev| prev.max(today_start)),
+            );
+            self.today_dirty = true;
+            self.flush_if_dirty();
         }
     }
 
     pub fn has_pending_writes(&self) -> bool {
-        self.cursors_dirty || self.archive_dirty || self.today_dirty
+        self.needs_full_replace
+            || self.cursors_dirty
+            || self.archive_dirty
+            || self.today_dirty
+            || !self.dirty_cursor_keys.is_empty()
+            || !self.dirty_daily_keys.is_empty()
+            || !self.dirty_session_day_keys.is_empty()
+            || !self.pending_today_records.is_empty()
+            || self.today_pruned_before.is_some()
     }
 
-    /// 仅按脏标记落盘发生变化的缓存文件，避免无谓整包覆写
+    /// 仅按脏键 O(1) 增量点写 SQLite（或全量替换），避免无谓整包覆写
     pub fn flush_if_dirty(&mut self) {
         if !self.has_pending_writes() {
             return;
         }
+        if self.today_dirty || !self.pending_today_records.is_empty() {
+            self.today_cache.records.sort_by_key(|r| r.created_at);
+        }
         if !cfg!(test) {
-            if self.cursors_dirty {
-                if let Some(parent) = self.cache_file.parent() {
-                    let _ = fs::create_dir_all(parent);
+            if let Some(ref mut db) = self.cache_db {
+                if self.needs_full_replace {
+                    let _ = db.replace_all(&self.state, &self.daily_archive, &self.today_cache);
+                } else {
+                    let _ = db.apply_delta(
+                        &self.state.cursors,
+                        &self.dirty_cursor_keys,
+                        &self.daily_archive,
+                        &self.dirty_daily_keys,
+                        &self.dirty_session_day_keys,
+                        self.today_cache.today_start,
+                        self.today_pruned_before,
+                        &self.pending_today_records,
+                    );
                 }
-                if let Ok(content) = serde_json::to_string(&self.state) {
-                    let _ = fs::write(&self.cache_file, content);
-                }
-            }
-            if self.archive_dirty {
-                self.daily_archive.save();
-            }
-            if self.today_dirty {
-                self.today_cache.records.sort_by_key(|r| r.created_at);
-                self.today_cache.save();
             }
         }
+        self.dirty_cursor_keys.clear();
+        self.dirty_daily_keys.clear();
+        self.dirty_session_day_keys.clear();
+        self.pending_today_records.clear();
+        self.today_pruned_before = None;
+        self.needs_full_replace = false;
         self.cursors_dirty = false;
         self.archive_dirty = false;
         self.today_dirty = false;
@@ -333,6 +451,60 @@ impl NativeScanner {
         if due {
             self.flush_if_dirty();
         }
+    }
+
+    /// 用全量重新扫描的结果原子替换当前内存状态并全量落盘至 SQLite
+    pub fn apply_full_rescan(
+        &mut self,
+        state: NativeScanState,
+        daily_archive: NativeDailyArchive,
+        mut today_cache: NativeTodayCache,
+    ) {
+        today_cache.records.sort_by_key(|r| r.created_at);
+        self.state = state;
+        self.daily_archive = daily_archive;
+        self.today_cache = today_cache;
+        self.dirty_cursor_keys.clear();
+        self.dirty_daily_keys.clear();
+        self.dirty_session_day_keys.clear();
+        self.pending_today_records.clear();
+        self.today_pruned_before = None;
+        self.needs_full_replace = true;
+        self.flush_if_dirty();
+    }
+
+    /// 优雅退出：落盘所有脏变更并执行被动 WAL checkpoint
+    pub fn shutdown(&mut self) {
+        self.flush_if_dirty();
+        if !cfg!(test) {
+            if let Some(ref db) = self.cache_db {
+                db.checkpoint_passive();
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn prune_missing_cursors(&mut self) -> usize {
+        let stale: Vec<String> = self
+            .state
+            .cursors
+            .keys()
+            .filter(|p| !Path::new(p).exists())
+            .cloned()
+            .collect();
+        let count = stale.len();
+        if count > 0 {
+            for p in &stale {
+                self.state.cursors.remove(p);
+                self.dirty_cursor_keys.remove(p);
+            }
+            if !cfg!(test) {
+                if let Some(ref mut db) = self.cache_db {
+                    let _ = db.delete_cursors(&stale);
+                }
+            }
+        }
+        count
     }
 
     /// 扫描所有支持的本地原生会话日志并生成今日增量 TokenRecord，同时把所有已扫描记录归档到 NativeDailyArchive
@@ -386,7 +558,9 @@ impl NativeScanner {
         archive_dirty: &mut bool,
     ) {
         // 统一归档到 NativeDailyArchive (下游所有消费者按 date < today_str 过滤，跨日零点不会丢失前一天数据)
-        self.daily_archive.add_record(&rec);
+        let (daily_key, sess_key) = self.daily_archive.add_record(&rec);
+        self.dirty_daily_keys.insert(daily_key);
+        self.dirty_session_day_keys.insert(sess_key);
         *archive_dirty = true;
 
         if today_start <= 0 || rec.created_at >= today_start {
@@ -394,8 +568,14 @@ impl NativeScanner {
                 if self.today_cache.today_start != today_start {
                     self.today_cache.today_start = today_start;
                     self.today_cache.records.retain(|r| r.created_at >= today_start);
+                    self.pending_today_records.retain(|r| r.created_at >= today_start);
+                    self.today_pruned_before = Some(
+                        self.today_pruned_before
+                            .map_or(today_start, |prev| prev.max(today_start)),
+                    );
                 }
                 self.today_cache.records.push(rec.clone());
+                self.pending_today_records.push(rec.clone());
             }
             records.push(rec);
         }
@@ -628,6 +808,7 @@ impl NativeScanner {
         cursor.last_modified_sec = mtime_sec;
         cursor.last_event_ts_ms = request_start_ms;
         cursor.last_msg_id = last_flushed_msg_id;
+        self.dirty_cursor_keys.insert(file_key.clone());
         self.state.cursors.insert(file_key, cursor);
         *cursor_dirty = true;
     }
@@ -799,6 +980,7 @@ impl NativeScanner {
 
         cursor.last_byte_offset = current_offset;
         cursor.last_modified_sec = mtime_sec;
+        self.dirty_cursor_keys.insert(file_key.clone());
         self.state.cursors.insert(file_key, cursor);
         *cursor_dirty = true;
     }
@@ -1068,6 +1250,7 @@ impl NativeScanner {
         cursor.last_total_cache_write = prev_cw;
         cursor.last_turn_start_ms = turn_start_ms;
         cursor.last_agent_done_ms = agent_done_ms;
+        self.dirty_cursor_keys.insert(file_key.clone());
         self.state.cursors.insert(file_key, cursor);
         *cursor_dirty = true;
     }
@@ -1226,6 +1409,7 @@ impl NativeScanner {
 
         cursor.last_byte_offset = current_offset;
         cursor.last_modified_sec = mtime_sec;
+        self.dirty_cursor_keys.insert(file_key.clone());
         self.state.cursors.insert(file_key, cursor);
         *cursor_dirty = true;
     }
@@ -1500,5 +1684,52 @@ mod tests {
         assert!(!scanner.has_pending_writes(), "显式刷盘应清空所有脏标记");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_apply_full_rescan_replaces_stale_state() {
+        let mut scanner = NativeScanner::new_ephemeral();
+        scanner.state.cursors.insert("D:/stale.jsonl".to_string(), FileCursor::default());
+        scanner.daily_archive.entries.insert(
+            "2026-01-01|claude|old".to_string(),
+            NativeDailyEntry::default(),
+        );
+        scanner.today_cache.records.push(TokenRecord {
+            request_id: "stale_req".into(),
+            session_id: "s".into(),
+            app_type: "claude".into(),
+            model: "old".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 2,
+            total_cost_usd: 0.0,
+            latency_ms: 0,
+            created_at: 100,
+        });
+
+        let mut new_state = NativeScanState {
+            rev: NATIVE_SCAN_REV,
+            cursors: HashMap::new(),
+        };
+        new_state.cursors.insert("D:/fresh.jsonl".to_string(), FileCursor::default());
+        let mut new_arch = NativeDailyArchive::default();
+        new_arch.entries.insert(
+            "2026-11-24|codex|gpt-5.3-codex".to_string(),
+            NativeDailyEntry::default(),
+        );
+        let new_today = NativeTodayCache {
+            today_start: 1_760_000_000,
+            records: Vec::new(),
+        };
+
+        scanner.apply_full_rescan(new_state, new_arch, new_today);
+        assert!(!scanner.has_pending_writes());
+        assert!(!scanner.state.cursors.contains_key("D:/stale.jsonl"));
+        assert!(scanner.state.cursors.contains_key("D:/fresh.jsonl"));
+        assert!(!scanner.daily_archive.entries.contains_key("2026-01-01|claude|old"));
+        assert!(scanner.daily_archive.entries.contains_key("2026-11-24|codex|gpt-5.3-codex"));
+        assert!(scanner.today_cache.records.is_empty());
     }
 }

@@ -121,6 +121,10 @@ impl TokenCollector {
         self.native_scanner.flush_if_dirty();
     }
 
+    pub fn shutdown_native_cache(&mut self) {
+        self.native_scanner.shutdown();
+    }
+
     /// 原生会话扫描模式同步：直接扫描 Claude, Antigravity, Codex, Copilot 本地原生会话目录
     pub fn sync_native(&mut self, config: &crate::config::HudConfig) -> usize {
         let current_today_start = crate::history_cache::local_start_of_today();

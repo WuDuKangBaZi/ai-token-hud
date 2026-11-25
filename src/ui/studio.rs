@@ -600,16 +600,18 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
         ui.add_space(4.0);
 
         let dir = HudConfig::app_dir();
+        let db_size_kb = crate::cache_db::total_db_size_bytes(&crate::native_scanner::NativeScanner::db_path()) as f64 / 1024.0;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(lang.tr("本地配置与 T-1 历史归档缓存", "Config & Local History Rollup Cache")).size(11.5).strong().color(t.text_secondary));
+                ui.label(RichText::new(lang.tr("本地配置与 SQLite 历史归档缓存", "Config & SQLite History Archive Cache")).size(11.5).strong().color(t.text_secondary));
                 ui.label(
                     RichText::new(format!(
-                        "{} · {} ({} reqs · {})",
+                        "{} · {} ({} reqs · {} · SQLite {:.1} KB)",
                         dir.to_string_lossy(),
                         app.history_cache.cutoff_date,
                         app.history_cache.total_requests,
-                        StatsEngine::format_compact(app.history_cache.total_tokens)
+                        StatsEngine::format_compact(app.history_cache.total_tokens),
+                        db_size_kb
                     ))
                     .font(theme::mono(10.2))
                     .color(t.text_muted),
@@ -619,8 +621,20 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
                 if icons::action_button(ui, Icon::Folder, lang.tr("打开目录", "Open Folder"), t.accent, t.input_bg, t.row_hover, t.border_subtle, t.control_rounding).clicked() {
                     let _ = std::process::Command::new("explorer").arg(&dir).spawn();
                 }
+                let rescan_label = if app.is_rescanning {
+                    lang.tr("扫描中...", "Scanning...")
+                } else {
+                    lang.tr("全量重扫", "Full Rescan")
+                };
+                if icons::action_button(ui, Icon::Refresh, rescan_label, t.accent, t.input_bg, t.row_hover, t.border_subtle, t.control_rounding).clicked() && !app.is_rescanning {
+                    app.trigger_full_rescan(ui.ctx());
+                }
             });
         });
+        if let Some(status) = &app.rescan_status {
+            let color = if app.is_rescanning { t.accent } else { t.success };
+            ui.label(RichText::new(status).size(10.5).color(color));
+        }
     });
     theme::paint_surface_accents(ui.painter(), budget_card.response.rect.shrink(0.5), t);
 }
@@ -758,7 +772,9 @@ fn render_drivers_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &ThemeTokens
             app.collector.last_sync_rowid = 0;
             app.collector.last_sync_timestamp = app.collector.today_start - 1;
             app.collector.sync(&app.config);
+            app.collector.flush_native_cache();
             app.history_cache.sync_historical_if_needed(&app.collector.db_path, &app.config);
+            app.period_base_cache.invalidate();
             app.refresh_stats();
             app.calendar_state.refresh(&app.collector, &app.config);
             app.refresh_breakdown();
@@ -781,6 +797,46 @@ fn render_drivers_page(app: &mut TokenHudApp, ui: &mut egui::Ui, t: &ThemeTokens
             )
         };
         ui.label(RichText::new(env_txt).size(10.8).color(t.text_muted));
+
+        ui.add_space(6.0);
+        ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
+        ui.add_space(6.0);
+
+        let db_size_kb = crate::cache_db::total_db_size_bytes(&crate::native_scanner::NativeScanner::db_path()) as f64 / 1024.0;
+        let cursor_cnt = app.collector.native_scanner.state.cursors.len();
+        let daily_cnt = app.collector.native_scanner.daily_archive.entries.len();
+        let sess_cnt = app.collector.native_scanner.daily_archive.session_days.len();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(lang.tr("本地 SQLite 增量缓存库 (WAL)", "Local SQLite WAL Cache")).size(11.5).strong().color(t.text_secondary));
+                let meta_txt = if lang.is_en() {
+                    format!(
+                        "native_cache.db ({:.1} KB) · {} cursors · {} daily entries · {} session-days",
+                        db_size_kb, cursor_cnt, daily_cnt, sess_cnt
+                    )
+                } else {
+                    format!(
+                        "native_cache.db ({:.1} KB) · {} 个文件游标 · {} 条日汇总 · {} 条会话明细",
+                        db_size_kb, cursor_cnt, daily_cnt, sess_cnt
+                    )
+                };
+                ui.label(RichText::new(meta_txt).font(theme::mono(10.2)).color(t.text_muted));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let btn_label = if app.is_rescanning {
+                    lang.tr("全量扫描中...", "Scanning...")
+                } else {
+                    lang.tr("全量重新扫描", "Full Rescan")
+                };
+                if icons::action_button(ui, Icon::Refresh, btn_label, t.accent, t.input_bg, t.row_hover, t.border_subtle, t.control_rounding).clicked() && !app.is_rescanning {
+                    app.trigger_full_rescan(ui.ctx());
+                }
+            });
+        });
+        if let Some(status) = &app.rescan_status {
+            let color = if app.is_rescanning { t.accent } else { t.success };
+            ui.label(RichText::new(status).size(10.5).color(color));
+        }
     });
     theme::paint_surface_accents(ui.painter(), drv_card.response.rect.shrink(0.5), t);
 

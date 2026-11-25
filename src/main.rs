@@ -8,6 +8,7 @@ mod collector;
 mod history_cache;
 mod stats;
 mod watcher;
+mod cache_db;
 mod native_scanner;
 mod tray;
 mod range_stats;

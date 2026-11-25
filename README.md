@@ -2,7 +2,7 @@
 
 <div align="center">
 
-[![Release](https://img.shields.io/badge/Release-v0.2.2-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.2)
+[![Release](https://img.shields.io/badge/Release-v0.2.3-0ea5e9?style=flat-square&logo=github)](https://github.com/WuDuKangBaZi/ai-token-hud/releases/tag/v0.2.3)
 ![Rust](https://img.shields.io/badge/Language-Rust-orange?style=flat-square&logo=rust)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue?style=flat-square&logo=windows)
 ![GUI](https://img.shields.io/badge/GUI-eframe%20%2F%20egui-purple?style=flat-square)
@@ -14,7 +14,7 @@
 实时监控 Claude Code、Codex、Antigravity、GitHub Copilot、Gemini 等 AI 编程工具的输出流速、当天花费、周期累计与缓存命中率。  
 基于 Windows `ReadDirectoryChangesW` 文件写入事件驱动刷新，空闲时零轮询、0% CPU 占用与极低磁盘 I/O，内存自动修剪至 ~15–30 MB。
 
-[前往 GitHub Releases 下载 v0.2.2 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
+[前往 GitHub Releases 下载 v0.2.3 绿色免安装版](https://github.com/WuDuKangBaZi/ai-token-hud/releases/latest)
 
 </div>
 
@@ -47,8 +47,8 @@
   - 内置 2026 主流大模型官方单价表（Claude、OpenAI/Codex、Gemini、DeepSeek、Qwen、GLM、EXAONE、Grok、MiniMax 等），支持一键同步 `models.dev` 与 OpenRouter 在线定价目录。
   - 支持行内修改或手动新增自定义模型，变更后**纯内存回溯重算历史缓存与所有报表**；支持 USD / CNY 实时汇率同步与开机自动更新。
 - **原生与 CC Switch 双引擎驱动**：
-  - 自动探测系统环境，支持智能切换或手动强制 **CC Switch SQLite** / **原生会话日志扫描**，并记忆多日原生历史（`native_daily.json` + `native_today.json`），跨零点与重启零数据丢失。
-  - **极低磁盘 I/O**：`ReadDirectoryChangesW` 活跃期间零空闲目录轮询；原生缓存采用分文件脏标记与 10 秒合并节流落盘，仅重写发生变化的文件（退出、最小化至托盘及跨零点自动立即刷盘）。
+  - 自动探测系统环境，支持智能切换或手动强制 **CC Switch SQLite** / **原生会话日志扫描**，底层采用嵌入式 **SQLite WAL 增量缓存库（`native_cache.db`）** 持久化游标、多日汇总、会话日明细与今日快照，跨零点与重启零数据丢失（旧版 `native_*.json` 首次启动自动无损迁移为 `.bak`），并支持工作台与右键菜单一键触发**后台非阻塞「全量重新扫描」**。
+  - **极低磁盘 I/O**：`ReadDirectoryChangesW` 活跃期间零空闲目录轮询；原生缓存基于脏键追踪与 10 秒合并节流落盘，仅对发生变更的游标与归档行执行 O(1) SQLite 点写（彻底消除大 JSON 整包写放大），退出、最小化至托盘及跨零点自动立即刷盘并执行被动 WAL checkpoint。
 
 ---
 
@@ -127,10 +127,8 @@ target/release/ai-token-hud.exe --settings 0
 | 文件 | 位置 | 内容 |
 | :--- | :--- | :--- |
 | `config.json` | `~/.ai-token-hud/` | 主题、停靠位置、面板高度、`TOTAL` 范围、汇率、自定义单价、驱动与工具开关 |
-| `history_cache.json` | `~/.ai-token-hud/` | T-1 历史统计加速缓存 |
-| `native_cursors.json` | `~/.ai-token-hud/` | 原生扫描字节偏移、模型与会话增量游标 |
-| `native_daily.json` | `~/.ai-token-hud/` | 原生扫描多日聚合归档（含按天与按会话粒度，支持跨日与重算） |
-| `native_today.json` | `~/.ai-token-hud/` | 原生扫描今日记录快照（重启/切驱动恢复零丢失） |
+| `history_cache.json` | `~/.ai-token-hud/` | T-1 历史统计加速缓存（采用 `.tmp` + rename 原子写入） |
+| `native_cache.db` | `~/.ai-token-hud/` | 嵌入式 SQLite WAL 增量缓存库（存储文件游标、多日汇总、会话日明细与今日快照；旧版 `native_*.json` 首次启动自动迁移为 `.bak`） |
 | `pricing_catalog.json` | `~/.ai-token-hud/` | 本地缓存的在线模型定价目录 |
 
 删除以上文件即可恢复出厂初始状态。开启「开机自动启动」仅写入当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\AiTokenHud`，卸载前在设置关闭该开关即可清理。
@@ -166,6 +164,7 @@ src/
 ├── pricing_catalog.rs # models.dev / OpenRouter 在线定价目录异步拉取、合并与本地缓存
 ├── detector.rs        # 本机已安装 AI 编程工具探测
 ├── history_cache.rs   # T-1 历史累计加速缓存与单价变更内存重算
+├── cache_db.rs        # 嵌入式 SQLite WAL 增量缓存库（O(1) 脏键点写、事务原子性与旧 JSON 自动迁移）
 ├── native_scanner.rs  # Claude(+subagents) / Antigravity / Codex(.zst) / Copilot 增量解析与归档
 ├── project_stats.rs   # 跨工具项目路径、Antigravity 摘要 DB 与会话标题索引、项目排行榜引擎
 ├── range_stats.rs     # 日历热力、多周期区间摘要与消耗全景下钻（RangeBreakdown）引擎、CSV/TSV 导出
