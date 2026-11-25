@@ -858,6 +858,8 @@ impl TokenHudApp {
             1 => {
                 ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Focus);
+                self.win_fx.invalidate();
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
             }
             2 => {
                 ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Visible(false));
@@ -1100,13 +1102,16 @@ impl TokenHudApp {
         // 6. 自适应主窗口尺寸与原生窗口特效 / 穿透状态同步
         let is_compact_bar = !self.cost_dropdown_open && !self.show_context_menu;
         let theme_kind = self.theme_kind();
-        self.win_fx.sync_hud_window(
+        if !self.win_fx.sync_hud_window(
             ctx,
             self.config.backdrop_blur,
             self.config.click_through,
+            self.config.always_on_top,
             theme_kind,
             is_compact_bar,
-        );
+        ) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
 
         let target_width = self.calculate_target_width();
         let target_height = if self.cost_dropdown_open {

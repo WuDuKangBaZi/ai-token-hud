@@ -218,10 +218,20 @@ fn main() {
         let safe_pos = win_fx::clamp_pos_to_virtual_screen(pos, 560.0, 38.0);
         viewport = viewport.with_position(safe_pos);
     }
-    let native_options = eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut native_options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some()
+        && std::env::var("AI_TOKEN_HUD_WAYLAND").as_deref() != Ok("1")
+    {
+        native_options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }));
+    }
 
     if let Err(e) = eframe::run_native(
         "AI Token HUD Bar",

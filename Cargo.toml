@@ -20,4 +20,5 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+winit = { version = "0.30", default-features = false, features = ["x11"] }
 x11rb = { version = "0.13", default-features = false, features = ["randr"] }

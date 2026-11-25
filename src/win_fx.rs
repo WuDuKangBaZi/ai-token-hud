@@ -11,27 +11,38 @@ pub struct AppliedWinFx {
     pub blur_active: bool,
     pub corner_mode: u32,
     pub click_through: bool,
+    pub always_on_top: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct WinFxController {
     last: AppliedWinFx,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    retry_started_at: Option<std::time::Instant>,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    last_retry_at: Option<std::time::Instant>,
 }
 
 impl WinFxController {
-    /// 同步 HUD 主悬浮窗的圆角、背景模糊与鼠标点击穿透属性
-    /// `is_compact_bar`: 仅当悬浮窗处于收起的单行横条形态时启用窗口级圆角与模糊，
-    /// 展开下拉面板或右键菜单时临时切回全透明无裁剪，彻底杜绝透明间隙出现矩形毛玻璃伪影。
+    pub fn invalidate(&mut self) {
+        self.last = AppliedWinFx::default();
+        self.retry_started_at = None;
+        self.last_retry_at = None;
+    }
+
+    /// 同步 HUD 主悬浮窗的圆角、背景模糊、置顶与鼠标点击穿透属性
+    /// 返回 `true` 表示已同步或无需重试；返回 `false` 表示窗口尚未映射，需要稍后重试
     pub fn sync_hud_window(
         &mut self,
         #[cfg_attr(target_os = "windows", allow(unused_variables))] ctx: &eframe::egui::Context,
         backdrop_blur: bool,
         click_through: bool,
+        always_on_top: bool,
         theme_kind: ThemeKind,
         is_compact_bar: bool,
-    ) {
+    ) -> bool {
         if cfg!(test) {
-            return;
+            return true;
         }
         let blur_active = backdrop_blur && is_compact_bar;
         // DWM_WINDOW_CORNER_PREFERENCE: 1 = DONOTROUND, 2 = ROUND (8px), 3 = ROUNDSMALL (4px)
@@ -49,15 +60,36 @@ impl WinFxController {
             blur_active,
             corner_mode,
             click_through: effective_click_through,
+            always_on_top,
         };
         if self.last == desired {
-            return;
+            return true;
         }
+
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_retry_at {
+            if now.duration_since(prev).as_millis() < 80 {
+                return false;
+            }
+        }
+        self.last_retry_at = Some(now);
+        let started = *self.retry_started_at.get_or_insert(now);
 
         #[cfg(target_os = "windows")]
         {
             if apply_win32_fx(blur_active, corner_mode, effective_click_through) {
                 self.last = desired;
+                self.retry_started_at = None;
+                self.last_retry_at = None;
+                return true;
+            }
+            if now.duration_since(started).as_secs_f32() >= 4.0 {
+                self.last = desired;
+                self.retry_started_at = None;
+                self.last_retry_at = None;
+                true
+            } else {
+                false
             }
         }
 
@@ -69,9 +101,156 @@ impl WinFxController {
                     eframe::egui::ViewportCommand::MousePassthrough(effective_click_through),
                 );
             }
-            self.last = desired;
+            #[cfg(target_os = "linux")]
+            let wm_synced = apply_linux_x11_wm_state(always_on_top);
+            #[cfg(not(target_os = "linux"))]
+            let wm_synced = true;
+
+            if wm_synced {
+                self.last = desired;
+                self.retry_started_at = None;
+                self.last_retry_at = None;
+                true
+            } else if now.duration_since(started).as_secs_f32() >= 4.0 {
+                self.last = desired;
+                self.retry_started_at = None;
+                self.last_retry_at = None;
+                true
+            } else {
+                false
+            }
         }
     }
+}
+
+/// 在 Linux X11/XWayland 下，于窗口映射后通过 EWMH ClientMessage 应用置顶、跨工作区固定与跳过任务栏属性
+#[cfg(target_os = "linux")]
+fn apply_linux_x11_wm_state(always_on_top: bool) -> bool {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, MapState};
+    use x11rb::rust_connection::RustConnection;
+
+    let dbg = std::env::var_os("AI_TOKEN_HUD_DEBUG").is_some();
+
+    if std::env::var_os("DISPLAY").is_none()
+        || std::env::var("AI_TOKEN_HUD_WAYLAND").as_deref() == Ok("1")
+    {
+        if dbg { eprintln!("[win_fx] skip x11 wm state (DISPLAY unset or WAYLAND=1)"); }
+        return true;
+    }
+
+    let Ok((conn, screen_num)) = RustConnection::connect(None) else {
+        if dbg { eprintln!("[win_fx] x11 connect failed"); }
+        return true;
+    };
+    let Some(screen) = conn.setup().roots.get(screen_num) else {
+        return true;
+    };
+    let root = screen.root;
+
+    let intern = |name: &[u8]| -> Option<u32> {
+        let atom = conn.intern_atom(false, name).ok()?.reply().ok()?.atom;
+        if atom == x11rb::NONE { None } else { Some(atom) }
+    };
+
+    let Some(net_client_list) = intern(b"_NET_CLIENT_LIST") else {
+        if dbg { eprintln!("[win_fx] no _NET_CLIENT_LIST"); }
+        return true;
+    };
+    let Some(net_wm_pid) = intern(b"_NET_WM_PID") else {
+        return true;
+    };
+    let Some(wm_state) = intern(b"_NET_WM_STATE") else {
+        return true;
+    };
+    let Some(above) = intern(b"_NET_WM_STATE_ABOVE") else {
+        return true;
+    };
+    let sticky = intern(b"_NET_WM_STATE_STICKY").unwrap_or(0);
+    let skip_tb = intern(b"_NET_WM_STATE_SKIP_TASKBAR").unwrap_or(0);
+    let skip_pg = intern(b"_NET_WM_STATE_SKIP_PAGER").unwrap_or(0);
+    let net_wm_name = intern(b"_NET_WM_NAME");
+    let utf8_string = intern(b"UTF8_STRING");
+
+    let Ok(list_cookie) = conn.get_property(false, root, net_client_list, AtomEnum::WINDOW, 0, 1024) else {
+        return false;
+    };
+    let Ok(list_reply) = list_cookie.reply() else {
+        return false;
+    };
+    let Some(clients) = list_reply.value32() else {
+        return false;
+    };
+
+    let my_pid = std::process::id();
+    let mut target_win = None;
+    for win in clients {
+        let pid_ok = conn
+            .get_property(false, win, net_wm_pid, AtomEnum::CARDINAL, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32()?.next())
+            == Some(my_pid);
+        if !pid_ok {
+            continue;
+        }
+        let mut title = String::new();
+        if let (Some(n_atom), Some(u_atom)) = (net_wm_name, utf8_string) {
+            if let Ok(r) = conn
+                .get_property(false, win, n_atom, u_atom, 0, 256)
+                .and_then(|c| Ok(c.reply()))
+            {
+                if let Ok(reply) = r {
+                    title = String::from_utf8_lossy(&reply.value).into_owned();
+                }
+            }
+        }
+        if title.is_empty() {
+            if let Ok(Ok(reply)) = conn
+                .get_property(false, win, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 256)
+                .map(|c| c.reply())
+            {
+                title = String::from_utf8_lossy(&reply.value).into_owned();
+            }
+        }
+        if dbg { eprintln!("[win_fx] pid match win=0x{:x} title={:?}", win, title); }
+        if title.contains("AI Token HUD Bar") {
+            target_win = Some(win);
+            break;
+        }
+    }
+
+    let Some(win) = target_win else {
+        if dbg { eprintln!("[win_fx] target_win not in _NET_CLIENT_LIST yet"); }
+        return false;
+    };
+
+    let viewable = conn
+        .get_window_attributes(win)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|a| a.map_state == MapState::VIEWABLE);
+    if !viewable {
+        if dbg { eprintln!("[win_fx] win=0x{:x} not VIEWABLE yet", win); }
+        return false;
+    }
+
+    let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+    let action = if always_on_top { 1u32 } else { 0u32 };
+    let ev_above = ClientMessageEvent::new(32, win, wm_state, [action, above, sticky, 1, 0]);
+    let r1 = conn.send_event(false, root, mask, ev_above);
+
+    if skip_tb != 0 || skip_pg != 0 {
+        let (a1, a2) = if skip_tb != 0 { (skip_tb, skip_pg) } else { (skip_pg, 0) };
+        let ev_skip = ClientMessageEvent::new(32, win, wm_state, [1, a1, a2, 1, 0]);
+        let _ = conn.send_event(false, root, mask, ev_skip);
+    }
+
+    let fl = conn.flush();
+    if dbg {
+        eprintln!("[win_fx] sent _NET_WM_STATE action={} win=0x{:x} send={:?} flush={:?}", action, win, r1.is_ok(), fl.is_ok());
+    }
+    true
 }
 
 #[cfg(target_os = "windows")]

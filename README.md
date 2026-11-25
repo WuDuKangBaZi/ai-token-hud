@@ -128,6 +128,7 @@ bash scripts/install-linux.sh
 ```
 
 > **X11 与 Wayland 说明**：
+> - **置顶与屏幕停靠**：Ubuntu / GNOME Wayland 桌面默认会忽略客户端的置顶和全局坐标请求，因此程序在检测到 `DISPLAY` 可用时会自动走 X11/XWayland 通道，并在窗口映射后通过 EWMH（`_NET_WM_STATE_ABOVE` / `_NET_WM_STATE_STICKY` / `_NET_WM_STATE_SKIP_TASKBAR`）确保始终置顶悬浮（如需强制纯 Wayland 后端可设置环境变量 `AI_TOKEN_HUD_WAYLAND=1`）。
 > - **系统托盘**：使用 Freedesktop StatusNotifierItem (`ksni`)，KDE Plasma 与 XFCE 原生支持；Ubuntu GNOME 桌面默认自带 Ubuntu AppIndicators 扩展（若精简环境未启用，请开启 `gnome-shell-extension-appindicator`）。
 > - **全局快捷键**：X11 会话原生监听 `Ctrl+Alt+H / T / F`；Wayland 会话下出于桌面安全隔离限制，可在「系统设置 → 键盘快捷键」中绑定以下命令行 IPC 动作（零延迟控制已运行实例）：
 >   - `ai-token-hud --toggle`（显隐 HUD）

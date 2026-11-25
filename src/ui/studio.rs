@@ -483,8 +483,10 @@ fn render_appearance_page(app: &mut TokenHudApp, ui: &mut egui::Ui, root_ctx: &e
         ) {
             app.config.always_on_top = aot;
             app.config.save();
+            app.win_fx.invalidate();
             let level = if aot { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             root_ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::WindowLevel(level));
+            root_ctx.request_repaint_of(ViewportId::ROOT);
         }
 
         ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.divider));
